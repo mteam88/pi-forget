@@ -1,0 +1,31 @@
+{
+  "name": "pi-forget",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "A pi extension for reversible, branch-local context forgetting.",
+  "keywords": ["pi-package", "pi", "extension", "context"],
+  "pi": {
+    "extensions": ["./src/index.ts"]
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "tsx test/projector.test.ts",
+    "test:rpc": "tsx test/rpc-smoke.ts",
+    "check": "npm run typecheck && npm test"
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-ai": "*",
+    "@mariozechner/pi-agent-core": "*",
+    "@mariozechner/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@mariozechner/pi-ai": "latest",
+    "@mariozechner/pi-agent-core": "latest",
+    "@mariozechner/pi-coding-agent": "latest",
+    "@types/node": "latest",
+    "tsx": "latest",
+    "typebox": "latest",
+    "typescript": "latest"
+  }
+}
