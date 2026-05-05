@@ -6,9 +6,9 @@ Build a pi extension that lets the model remove selected prior context from futu
 
 MVP principle:
 
-> Forget provider-visible **turns**, not arbitrary message fragments.
+> Forget provider-visible turns **or specific provider-visible entries**.
 
-This makes the extension safe, reversible, branch-aware, and much simpler than trying to surgically remove individual tool calls/results.
+The original history remains intact; forget directives only filter future provider context.
 
 ## Source Findings
 
@@ -89,7 +89,7 @@ No duplicate branch parsing. No content matching. No special-case filtering logi
 - `forget` model-callable tool
 - `/forgotten` slash command
 - `/unforget <directive-id>` slash command
-- Turn-level omission from future provider requests
+- Turn-level and entry-level omission from future provider requests
 - Branch-local, append-only persistence
 
 ### Deliberately exclude from MVP
@@ -120,10 +120,16 @@ turn:13
   assistant e5f6a7b8: text
 ```
 
-The model forgets whole turns:
+The model can forget whole turns:
 
 ```ts
 forget({ targets: ["turn:12"], reason: "obsolete auth debugging path" })
+```
+
+Or specific entries:
+
+```ts
+forget({ targets: ["entry:fde92dfa"], reason: "large local file listing" })
 ```
 
 Result:
@@ -175,20 +181,15 @@ Parameters:
 }
 ```
 
-MVP only accepts:
+MVP accepts:
 
 ```text
 turn:12
-turn:13
+entry:fde92dfa
+fde92dfa
 ```
 
-Reject raw entry IDs and ranges with a helpful message:
-
-```text
-MVP forgets whole turns only. Run list_context and target turn:N.
-```
-
-Why: whole-turn-only forgetting avoids dangling assistant tool calls, orphaned tool results, and invalid provider context.
+Ranges are deferred. Entry IDs must be provider-visible entries returned by `list_context`.
 
 ## Persistence Model
 
@@ -303,7 +304,7 @@ Appends an unforget entry:
 
 ## Safety Rules
 
-- MVP accepts only `turn:N` targets.
+- MVP accepts `turn:N` and `entry:<id>` targets.
 - Turns are provider-visible turns from `list_context`, not raw session indices.
 - Do not forget the current in-progress turn.
 - Reconstruct active state from current branch only.
@@ -320,7 +321,7 @@ Appends an unforget entry:
 5. Implement `groupTurns(items)`.
 6. Implement active directive reconstruction from current branch custom entries.
 7. Implement `list_context`.
-8. Implement `forget` for `turn:N` only.
+8. Implement `forget` for `turn:N` and `entry:<id>`.
 9. Implement `context` filtering.
 10. Implement `/forgotten`.
 11. Implement `/unforget <directive-id>`.
@@ -355,10 +356,4 @@ Add only after MVP is stable:
 
 ## Why This Is the 6/5 Version
 
-The previous plan tried to support IDs, ranges, and compaction targets immediately. That was powerful but too much surface area.
-
-This version keeps one strong invariant:
-
-> A forget directive removes complete provider-visible turns resolved from one projector.
-
-That invariant makes the MVP easy to reason about, hard to corrupt, and still genuinely useful.
+One projector owns all provider-visible provenance. Forget directives can target either complete turns or exact provider-visible entries by ID, while staying reversible and branch-local.

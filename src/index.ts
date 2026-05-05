@@ -200,10 +200,6 @@ function parseEntryTarget(target: string): string | undefined {
 	return /^[a-zA-Z0-9_-]{8,}$/.test(trimmed) ? trimmed : undefined;
 }
 
-function isSafeStandaloneItem(item: ContextItem): boolean {
-	return item.entryType === "message" && item.message.role === "bashExecution";
-}
-
 function compactText(text: string, limit = SNIPPET_CHARS): string {
 	const normalized = text.replace(/\s+/g, " ").trim();
 	if (normalized.length <= limit) return normalized;
@@ -375,18 +371,12 @@ function createForgetDirective(
 		if (entryId !== undefined) {
 			const item = projection.items.find((candidate) => candidate.entryId === entryId);
 			if (!item) return { text: `Unknown entry ${entryId}. Run list_context for current visible entries.`, details: { error: "unknown_entry", target } };
-			if (!isSafeStandaloneItem(item)) {
-				return {
-					text: `Entry ${entryId} is not safely forgettable by itself. Use its containing turn:N from list_context instead.`,
-					details: { error: "unsafe_entry", target },
-				};
-			}
 			if (!entryIds.includes(entryId)) entryIds.push(entryId);
 			continue;
 		}
 
 		return {
-			text: `Invalid target ${target}. Use turn:N, or entry:<id> for standalone bashExecution entries.`,
+			text: `Invalid target ${target}. Use turn:N or entry:<id> from list_context.`,
 			details: { error: "invalid_target", target },
 		};
 	}
@@ -459,11 +449,11 @@ export default function piForget(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "forget",
 		label: "Forget",
-		description: "Omit provider-visible turns, or standalone bashExecution entries, from future provider requests without deleting session history.",
-		promptSnippet: "Forget stale context by turn:N, or entry:<id> for standalone bashExecution entries, from list_context",
-		promptGuidelines: ["Use forget with turn:N targets from list_context. For standalone bashExecution entries only, use entry:<id>. Other entries are expanded/rejected for safety."],
+		description: "Omit provider-visible turns or specific entries from future provider requests without deleting session history.",
+		promptSnippet: "Forget stale context by turn:N or entry:<id> from list_context",
+		promptGuidelines: ["Use forget with turn:N or entry:<id> targets from list_context."],
 		parameters: Type.Object({
-			targets: Type.Array(Type.String({ description: "Targets to forget: turn:N, or entry:<id> for standalone bashExecution entries." }), {
+			targets: Type.Array(Type.String({ description: "Targets to forget: turn:N or entry:<id>." }), {
 				minItems: 1,
 			}),
 			reason: Type.Optional(Type.String({ description: "Why this context should be omitted." })),
@@ -490,7 +480,7 @@ export default function piForget(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("forget", {
-		description: "Forget provider-visible turns or standalone bashExecution entries: /forget turn:N [reason]",
+		description: "Forget provider-visible turns or entries: /forget turn:N|entry:id [reason]",
 		handler: async (args, ctx) => {
 			const [target, ...reasonParts] = args.trim().split(/\s+/).filter(Boolean);
 			if (!target) {
