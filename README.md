@@ -30,11 +30,19 @@ turn:1
 
 ### `forget`
 
-Forgets whole turns only:
+Forgets whole turns:
 
 ```ts
 forget({ targets: ["turn:1"], reason: "obsolete debugging path" })
 ```
+
+It can also forget standalone `bashExecution` entries by ID:
+
+```ts
+forget({ targets: ["entry:fde92dfa"], reason: "local file listing" })
+```
+
+Other entry types are rejected for safety; use their containing `turn:N` instead.
 
 The original session remains unchanged; a `pi-forget` custom entry is appended.
 
@@ -42,6 +50,7 @@ The original session remains unchanged; a `pi-forget` custom entry is appended.
 
 ```text
 /forget turn:1 optional reason
+/forget entry:fde92dfa optional reason
 /forgotten
 /unforget forget-001-abcd
 ```
@@ -50,7 +59,7 @@ The `/forget` command is intentionally included for manual/RPC testing and emerg
 
 ## Design invariant
 
-One projection mirrors pi's `buildSessionContext()` and attaches source entry IDs. Every command/tool/filter uses that projection. MVP omits complete provider-visible turns, which avoids dangling tool-call/tool-result context.
+One projection mirrors pi's `buildSessionContext()` and attaches source entry IDs. Every command/tool/filter uses that projection. MVP omits complete provider-visible turns, plus standalone `bashExecution` entries, which avoids dangling tool-call/tool-result context.
 
 ## Development
 

@@ -193,6 +193,17 @@ function parseTurnTarget(target: string): number | undefined {
 	return Number.isSafeInteger(num) && num > 0 ? num : undefined;
 }
 
+function parseEntryTarget(target: string): string | undefined {
+	const trimmed = target.trim();
+	const entryMatch = /^entry:([a-zA-Z0-9_-]+)$/.exec(trimmed);
+	if (entryMatch) return entryMatch[1];
+	return /^[a-zA-Z0-9_-]{8,}$/.test(trimmed) ? trimmed : undefined;
+}
+
+function isSafeStandaloneItem(item: ContextItem): boolean {
+	return item.entryType === "message" && item.message.role === "bashExecution";
+}
+
 function compactText(text: string, limit = SNIPPET_CHARS): string {
 	const normalized = text.replace(/\s+/g, " ").trim();
 	if (normalized.length <= limit) return normalized;
@@ -231,9 +242,58 @@ function summarizeItem(item: ContextItem): string {
 			return `branch-summary ${item.entryId}: "${compactText(msg.summary ?? "", 120)}"`;
 		case "compactionSummary":
 			return `compaction ${item.entryId}: summary of earlier context (${msg.tokensBefore ?? "?"} tokens before)`;
+		case "bashExecution":
+			return `bashExecution ${item.entryId}: ${msg.command ? `\`${compactText(msg.command, 80)}\`, ` : ""}${(msg.output ?? "").length} chars${msg.output ? `, "${compactText(msg.output, 90)}"` : ""}`;
 		default:
 			return `${msg.role ?? "message"} ${item.entryId}`;
 	}
+}
+
+function messageKey(message: AgentMessage): string {
+	const msg = message as any;
+	switch (msg.role) {
+		case "user":
+			return `user:${JSON.stringify(msg.content)}`;
+		case "assistant":
+			return `assistant:${JSON.stringify(msg.content)}`;
+		case "toolResult":
+			return `toolResult:${msg.toolCallId}:${msg.toolName}:${JSON.stringify(msg.content)}`;
+		case "bashExecution":
+			return `bashExecution:${msg.command}:${msg.output}:${msg.exitCode}:${msg.cancelled}`;
+		case "custom":
+			return `custom:${msg.customType}:${JSON.stringify(msg.content)}`;
+		case "branchSummary":
+			return `branchSummary:${msg.fromId}:${msg.summary}`;
+		case "compactionSummary":
+			return `compactionSummary:${msg.summary}:${msg.tokensBefore}`;
+		default:
+			return `${msg.role}:${JSON.stringify(msg)}`;
+	}
+}
+
+function filterWithProjection(messages: AgentMessage[], items: ContextItem[], forgotten: Set<string>): { messages: AgentMessage[]; aligned: boolean } {
+	const filtered: AgentMessage[] = [];
+	let itemIndex = 0;
+	let aligned = true;
+
+	for (const message of messages) {
+		const key = messageKey(message);
+		const item = items[itemIndex];
+		if (item && messageKey(item.message) === key) {
+			if (!forgotten.has(item.entryId)) filtered.push(message);
+			itemIndex++;
+			continue;
+		}
+
+		// During tool follow-up turns, agent.state can be one message ahead of the
+		// session branch. Keep unmatched in-flight messages rather than failing the
+		// whole filter.
+		aligned = false;
+		filtered.push(message);
+	}
+
+	if (itemIndex < items.length) aligned = false;
+	return { messages: filtered, aligned };
 }
 
 function formatContextIndex(ctx: ExtensionContext, scope: "recent" | "all", limit: number): string {
@@ -293,27 +353,42 @@ function createForgetDirective(
 
 	const turnNumbers: number[] = [];
 	const entryIds: string[] = [];
-	const rejected = targets.filter((target) => parseTurnTarget(target) === undefined);
-	if (rejected.length) {
-		return {
-			text: `MVP forgets whole turns only. Invalid target(s): ${rejected.join(", ")}. Run list_context and target turn:N.`,
-			details: { error: "invalid_targets", rejected },
-		};
-	}
-
 	const latestTurn = projection.turns.at(-1)?.number;
+
 	for (const target of targets) {
-		const number = parseTurnTarget(target)!;
-		const turn = projection.turns.find((candidate) => candidate.number === number);
-		if (!turn) return { text: `Unknown ${target}. Run list_context for current turn numbers.`, details: { error: "unknown_turn", target } };
-		if (number === latestTurn) {
-			return {
-				text: `Refusing to forget ${target}: MVP does not forget the current/latest turn.`,
-				details: { error: "latest_turn", target },
-			};
+		const turnNumber = parseTurnTarget(target);
+		if (turnNumber !== undefined) {
+			const turn = projection.turns.find((candidate) => candidate.number === turnNumber);
+			if (!turn) return { text: `Unknown ${target}. Run list_context for current turn numbers.`, details: { error: "unknown_turn", target } };
+			if (turnNumber === latestTurn) {
+				return {
+					text: `Refusing to forget ${target}: MVP does not forget the current/latest turn.`,
+					details: { error: "latest_turn", target },
+				};
+			}
+			turnNumbers.push(turnNumber);
+			for (const id of turn.entryIds) if (!entryIds.includes(id)) entryIds.push(id);
+			continue;
 		}
-		turnNumbers.push(number);
-		for (const id of turn.entryIds) if (!entryIds.includes(id)) entryIds.push(id);
+
+		const entryId = parseEntryTarget(target);
+		if (entryId !== undefined) {
+			const item = projection.items.find((candidate) => candidate.entryId === entryId);
+			if (!item) return { text: `Unknown entry ${entryId}. Run list_context for current visible entries.`, details: { error: "unknown_entry", target } };
+			if (!isSafeStandaloneItem(item)) {
+				return {
+					text: `Entry ${entryId} is not safely forgettable by itself. Use its containing turn:N from list_context instead.`,
+					details: { error: "unsafe_entry", target },
+				};
+			}
+			if (!entryIds.includes(entryId)) entryIds.push(entryId);
+			continue;
+		}
+
+		return {
+			text: `Invalid target ${target}. Use turn:N, or entry:<id> for standalone bashExecution entries.`,
+			details: { error: "invalid_target", target },
+		};
 	}
 
 	const newEntryIds = entryIds.filter((id) => !alreadyForgotten.has(id));
@@ -384,11 +459,11 @@ export default function piForget(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "forget",
 		label: "Forget",
-		description: "Omit whole provider-visible turns from future provider requests without deleting session history.",
-		promptSnippet: "Forget stale provider-visible context by turn:N from list_context",
-		promptGuidelines: ["Use forget with turn:N targets from list_context; pi-forget MVP does not accept raw entry IDs or ranges."],
+		description: "Omit provider-visible turns, or standalone bashExecution entries, from future provider requests without deleting session history.",
+		promptSnippet: "Forget stale context by turn:N, or entry:<id> for standalone bashExecution entries, from list_context",
+		promptGuidelines: ["Use forget with turn:N targets from list_context. For standalone bashExecution entries only, use entry:<id>. Other entries are expanded/rejected for safety."],
 		parameters: Type.Object({
-			targets: Type.Array(Type.String({ description: "Targets to forget. MVP accepts only turn:N, e.g. turn:12." }), {
+			targets: Type.Array(Type.String({ description: "Targets to forget: turn:N, or entry:<id> for standalone bashExecution entries." }), {
 				minItems: 1,
 			}),
 			reason: Type.Optional(Type.String({ description: "Why this context should be omitted." })),
@@ -403,21 +478,19 @@ export default function piForget(pi: ExtensionAPI) {
 		const forgotten = getForgottenEntryIds(ctx);
 		if (!forgotten.size) return;
 		const projection = projectContext(ctx.sessionManager);
-		if (event.messages.length !== projection.items.length) {
-			if (!warnedAboutAlignment) {
-				warnedAboutAlignment = true;
-				ctx.ui.notify(
-					`pi-forget: context alignment mismatch (${event.messages.length} messages vs ${projection.items.length} projected); not filtering.`,
-					"warning",
-				);
-			}
-			return;
+		const result = filterWithProjection(event.messages, projection.items, forgotten);
+		if (!result.aligned && !warnedAboutAlignment) {
+			warnedAboutAlignment = true;
+			ctx.ui.notify(
+				`pi-forget: context had in-flight/unprojected messages (${event.messages.length} messages vs ${projection.items.length} projected); filtered matched entries and kept unmatched messages.`,
+				"warning",
+			);
 		}
-		return { messages: event.messages.filter((_message, index) => !forgotten.has(projection.items[index]!.entryId)) };
+		return { messages: result.messages };
 	});
 
 	pi.registerCommand("forget", {
-		description: "Forget provider-visible turns: /forget turn:N [reason]",
+		description: "Forget provider-visible turns or standalone bashExecution entries: /forget turn:N [reason]",
 		handler: async (args, ctx) => {
 			const [target, ...reasonParts] = args.trim().split(/\s+/).filter(Boolean);
 			if (!target) {
@@ -460,4 +533,4 @@ export default function piForget(pi: ExtensionAPI) {
 	});
 }
 
-export const __test = { projectContext, groupTurns, getActiveDirectives, parseTurnTarget, formatContextIndex };
+export const __test = { projectContext, groupTurns, getActiveDirectives, parseTurnTarget, parseEntryTarget, formatContextIndex, filterWithProjection };

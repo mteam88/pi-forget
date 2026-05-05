@@ -91,6 +91,19 @@ function roles(messages: any[]): string[] {
 	assert.equal(__test.parseTurnTarget("turn:12"), 12);
 	assert.equal(__test.parseTurnTarget("range:a..b"), undefined);
 	assert.equal(__test.parseTurnTarget("abc123"), undefined);
+	assert.equal(__test.parseEntryTarget("entry:abc12345"), "abc12345");
+	assert.equal(__test.parseEntryTarget("abc12345"), "abc12345");
+}
+
+{
+	const sm = SessionManager.inMemory(process.cwd());
+	const first = sm.appendMessage(user("one"));
+	sm.appendMessage(assistant("two"));
+	const projected = __test.projectContext(sm as any);
+	const extra = user("in-flight");
+	const result = __test.filterWithProjection([...projected.items.map((item: any) => item.message), extra], projected.items, new Set([first]));
+	assert.equal(result.aligned, false);
+	assert.deepEqual(roles(result.messages), ["assistant", "user"]);
 }
 
 console.log("projector tests passed");
