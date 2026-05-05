@@ -93,6 +93,14 @@ function roles(messages: any[]): string[] {
 	assert.equal(__test.parseTurnTarget("abc123"), undefined);
 	assert.equal(__test.parseEntryTarget("entry:abc12345"), "abc12345");
 	assert.equal(__test.parseEntryTarget("abc12345"), "abc12345");
+	assert.equal(__test.parseOutputTarget("output:abc12345"), "abc12345");
+}
+
+{
+	const redacted = __test.redactOutput(toolResult("bash", "secret output"), "abc12345") as any;
+	assert.equal(redacted.role, "toolResult");
+	assert.equal(redacted.toolName, "bash");
+	assert.match(redacted.content[0].text, /output forgotten/);
 }
 
 {
@@ -104,6 +112,18 @@ function roles(messages: any[]): string[] {
 	const result = __test.filterWithProjection([...projected.items.map((item: any) => item.message), extra], projected.items, new Set([first]));
 	assert.equal(result.aligned, false);
 	assert.deepEqual(roles(result.messages), ["assistant", "user"]);
+}
+
+{
+	const sm = SessionManager.inMemory(process.cwd());
+	sm.appendMessage(user("run tool"));
+	sm.appendMessage(assistant("calling"));
+	const toolId = sm.appendMessage(toolResult("bash", "very secret output"));
+	const projected = __test.projectContext(sm as any);
+	const result = __test.filterWithProjection(projected.items.map((item: any) => item.message), projected.items, new Set(), new Set([toolId]));
+	assert.equal(result.aligned, true);
+	assert.equal(roles(result.messages).join(","), "user,assistant,toolResult");
+	assert.match((result.messages[2] as any).content[0].text, /output forgotten/);
 }
 
 console.log("projector tests passed");

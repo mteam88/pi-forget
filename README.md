@@ -42,6 +42,14 @@ It can also forget any specific provider-visible entry by ID:
 forget({ targets: ["entry:fde92dfa"], reason: "local file listing" })
 ```
 
+Or redact only a tool output while preserving the tool call/result shape:
+
+```ts
+forget({ targets: ["output:fde92dfa"], reason: "huge command output" })
+```
+
+`output:<id>` currently applies to `toolResult` and `bashExecution` entries. Tool results become `[output forgotten by pi-forget: <id>]`.
+
 The original session remains unchanged; a `pi-forget` custom entry is appended.
 
 ## Slash commands
@@ -49,6 +57,7 @@ The original session remains unchanged; a `pi-forget` custom entry is appended.
 ```text
 /forget turn:1 optional reason
 /forget entry:fde92dfa optional reason
+/forget output:fde92dfa optional reason
 /forgotten
 /unforget forget-001-abcd
 ```
@@ -57,7 +66,7 @@ The `/forget` command is intentionally included for manual/RPC testing and emerg
 
 ## Design invariant
 
-One projection mirrors pi's `buildSessionContext()` and attaches source entry IDs. Every command/tool/filter uses that projection. The extension can omit complete provider-visible turns or specific provider-visible entries.
+One projection mirrors pi's `buildSessionContext()` and attaches source entry IDs. Every command/tool/filter uses that projection. The extension can omit complete provider-visible turns, omit specific provider-visible entries, or redact only tool output while preserving the surrounding call context.
 
 ## Development
 
