@@ -23,7 +23,8 @@ const child = spawn("pi", [
 	"--offline",
 	"--no-context-files",
 	"--no-builtin-tools",
-	"--extension", resolve("src/index.ts"),
+	"--no-extensions",
+	"--extension", resolve("index.ts"),
 	"--session", sessionFile,
 ], { stdio: ["pipe", "pipe", "pipe"] });
 
