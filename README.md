@@ -2,18 +2,20 @@
 
 A pi extension for reversible, branch-local context forgetting.
 
-`pi-forget` lets the model omit stale prior turns from future provider requests without deleting or rewriting the JSONL session history.
+`pi-forget` lets the model omit stale prior turns from future provider requests without deleting or rewriting JSONL session history.
 
-## Install / run locally
+It requires a pi build with native `context_rewrite` support. Rewrites are append-only and branch-local, so provider requests, compaction, reloads, and context accounting share the same effective context.
+
+## Install
 
 ```bash
-pi --extension ./src/index.ts
+pi install https://github.com/mteam88/pi-forget
 ```
 
-Or install this directory as a local pi package:
+Until native context rewrites land upstream, use a pi build from:
 
-```bash
-pi install /absolute/path/to/pi-forget
+```text
+https://github.com/mteam88/pi-mono/tree/context-rewrites-for-pi-forget
 ```
 
 ## Tools
@@ -30,27 +32,25 @@ turn:1
 
 ### `forget`
 
-Forgets whole turns:
+Forget a whole visible turn:
 
 ```ts
 forget({ targets: ["turn:1"], reason: "obsolete debugging path" })
 ```
 
-It can also forget any specific provider-visible entry by ID:
+Forget a specific visible entry:
 
 ```ts
 forget({ targets: ["entry:fde92dfa"], reason: "local file listing" })
 ```
 
-Or redact only a tool output while preserving the tool call/result shape:
+Redact only a tool output while preserving the surrounding tool context:
 
 ```ts
 forget({ targets: ["output:fde92dfa"], reason: "huge command output" })
 ```
 
-`output:<id>` currently applies to `toolResult` and `bashExecution` entries. Tool results become `[output forgotten by pi-forget: <id>]`.
-
-The original session remains unchanged; a `pi-forget` custom entry is appended.
+`output:<id>` applies to `toolResult` and `bashExecution` entries. The original session entries remain unchanged; `pi-forget` appends `context_rewrite` entries.
 
 ## Slash commands
 
@@ -62,11 +62,7 @@ The original session remains unchanged; a `pi-forget` custom entry is appended.
 /unforget forget-001-abcd
 ```
 
-The `/forget` command is intentionally included for manual/RPC testing and emergency user control. The model-facing `forget` tool uses the same implementation.
-
-## Design invariant
-
-One projection mirrors pi's `buildSessionContext()` and attaches source entry IDs. Every command/tool/filter uses that projection. The extension can omit complete provider-visible turns, omit specific provider-visible entries, or redact only tool output while preserving the surrounding call context.
+The model-facing `forget` tool and manual `/forget` command use the same implementation.
 
 ## Development
 
@@ -74,3 +70,5 @@ One projection mirrors pi's `buildSessionContext()` and attaches source entry ID
 npm run check
 npm run test:rpc
 ```
+
+The RPC tests default to `pi-mono` source when present. Set `PI_BIN=/path/to/pi` to test another pi binary.

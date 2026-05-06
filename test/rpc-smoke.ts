@@ -1,9 +1,26 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { spawn } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
+
+function spawnPi(args: string[]) {
+	if (process.env.PI_BIN) {
+		return spawn(process.env.PI_BIN, args, { stdio: ["pipe", "pipe", "pipe"] });
+	}
+
+	const sourceCli = resolve("pi-mono/packages/coding-agent/src/cli.ts");
+	const tsxBin = resolve("pi-mono/node_modules/.bin/tsx");
+	if (existsSync(sourceCli) && existsSync(tsxBin)) {
+		return spawn(tsxBin, ["packages/coding-agent/src/cli.ts", ...args], {
+			cwd: resolve("pi-mono"),
+			stdio: ["pipe", "pipe", "pipe"],
+		});
+	}
+
+	return spawn("pi", args, { stdio: ["pipe", "pipe", "pipe"] });
+}
 
 const dir = mkdtempSync(join(tmpdir(), "pi-forget-rpc-"));
 const sessionFile = join(dir, "session.jsonl");
@@ -18,7 +35,7 @@ const entries = [
 ];
 writeFileSync(sessionFile, `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`);
 
-const child = spawn("pi", [
+const child = spawnPi([
 	"--mode", "rpc",
 	"--offline",
 	"--no-context-files",
@@ -26,7 +43,7 @@ const child = spawn("pi", [
 	"--no-extensions",
 	"--extension", resolve("index.ts"),
 	"--session", sessionFile,
-], { stdio: ["pipe", "pipe", "pipe"] });
+]);
 
 const events: any[] = [];
 const stderr: string[] = [];
@@ -77,23 +94,24 @@ assert.equal(forgetResponse.success, true);
 
 await new Promise((resolvePromise) => setTimeout(resolvePromise, 500));
 let content = readFileSync(sessionFile, "utf8");
-assert.match(content, /"customType":"pi-forget"/);
-assert.match(content, /"kind":"forget"/);
-assert.match(content, /"aaa00001"/);
-assert.match(content, /"aaa00002"/);
-const directiveId = content.match(/"directiveId":"([^"]+)"/)?.[1];
-assert(directiveId, "directive id persisted");
+assert.match(content, /"type":"context_rewrite"/);
+assert.match(content, /"target":\{"kind":"range","fromEntryId":"aaa00001","toEntryId":"aaa00002"\}/);
+assert.match(content, /"after":"\[context forgotten by pi-forget: turn:1\]"/);
+assert.doesNotMatch(content, /"customType":"pi-forget"/);
+const rewriteId = content.match(/"rewriteId":"([^"]+)"/)?.[1];
+assert(rewriteId, "rewrite id persisted");
 
 const forgottenId = send({ type: "prompt", message: "/forgotten" });
 const forgottenResponse = await waitForResponse(forgottenId);
 assert.equal(forgottenResponse.success, true);
 
-const unforgetId = send({ type: "prompt", message: `/unforget ${directiveId}` });
+const unforgetId = send({ type: "prompt", message: `/unforget ${rewriteId}` });
 const unforgetResponse = await waitForResponse(unforgetId);
 assert.equal(unforgetResponse.success, true);
 await new Promise((resolvePromise) => setTimeout(resolvePromise, 500));
 content = readFileSync(sessionFile, "utf8");
-assert.match(content, /"kind":"unforget"/);
+assert.match(content, /"type":"context_rewrite_undo"/);
+assert.match(content, new RegExp(`"rewriteId":"${rewriteId}"`));
 
 child.kill("SIGTERM");
 console.log(`rpc smoke passed (${sessionFile})`);

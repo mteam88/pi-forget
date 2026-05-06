@@ -1,143 +1,105 @@
+import { createHash } from "node:crypto";
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
-import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Type } from "typebox";
 
-const CUSTOM_TYPE = "pi-forget";
-const PROJECTION_VERSION = 1;
 const MAX_LIST_LIMIT = 50;
 const DEFAULT_LIST_LIMIT = 12;
 const SNIPPET_CHARS = 180;
 
 interface ContextItem {
 	entryId: string;
-	entryType: "message" | "custom_message" | "branch_summary" | "compaction";
+	message: AgentMessage;
+	sourceEntryIds: string[];
+	rewriteId?: string;
+}
+
+interface CoreContextRewriteInput {
+	rewriteId?: string;
+	target:
+		| { kind: "range"; fromEntryId: string; toEntryId: string }
+		| { kind: "surface"; entryId: string; surface: "text" | "output" | "summary" | "rendered" }
+		| { kind: "insert"; afterEntryId: string | null };
+	before?: string;
+	beforeHash?: string;
+	after: string;
+	reason?: string;
+	details?: unknown;
+	fromHook?: boolean;
+}
+
+interface CoreContextRewriteEntry extends CoreContextRewriteInput {
+	type: "context_rewrite";
+	id: string;
+	parentId: string | null;
+	timestamp: string;
+}
+
+interface CoreProjectionItem {
+	entryId: string;
+	sourceEntryIds: string[];
+	rewriteId?: string;
 	message: AgentMessage;
 }
+
+interface CoreSessionProjection {
+	items: CoreProjectionItem[];
+	activeRewrites: CoreContextRewriteEntry[];
+}
+
+type CoreExtensionAPI = ExtensionAPI & {
+	appendContextRewrite: (rewrite: CoreContextRewriteInput) => string;
+	undoContextRewrite: (rewriteId: string) => string;
+};
+
+type CoreSessionManager = ExtensionContext["sessionManager"] & {
+	buildSessionProjection?: () => CoreSessionProjection;
+};
 
 interface Turn {
 	number: number;
 	startEntryId: string;
 	entryIds: string[];
 	items: ContextItem[];
-	forgotten: boolean;
 }
 
-interface ProjectedContext {
-	branch: SessionEntry[];
-	items: ContextItem[];
-	prelude: ContextItem[];
-	turns: Turn[];
-	compactedAwayEntryIds: Set<string>;
-	activeCompactionId?: string;
+type MessageRecord = Record<string, unknown> & { role?: string };
+type ContentBlock = Record<string, unknown> & { type?: string };
+
+function messageRecord(message: AgentMessage): MessageRecord {
+	return message as unknown as MessageRecord;
 }
 
-interface ForgetEntry {
-	kind: "forget";
-	directiveId: string;
-	targets: string[];
-	turnNumbers: number[];
-	entryIds: string[];
-	outputEntryIds?: string[];
-	reason?: string;
-	createdAt: number;
-	createdAtLeafId: string | null;
-	projectionVersion: number;
+function hashContextText(text: string): string {
+	return `sha256:${createHash("sha256").update(text).digest("hex")}`;
 }
 
-interface UnforgetEntry {
-	kind: "unforget";
-	directiveId: string;
-	createdAt: number;
-	createdAtLeafId: string | null;
-}
-
-type PiForgetEntry = ForgetEntry | UnforgetEntry;
-
-interface ActiveDirective extends ForgetEntry {
-	entryIdsSet: Set<string>;
-	outputEntryIdsSet: Set<string>;
-}
-
-function isPiForgetEntry(data: unknown): data is PiForgetEntry {
-	if (!data || typeof data !== "object") return false;
-	const candidate = data as Record<string, unknown>;
-	return candidate.kind === "forget" || candidate.kind === "unforget";
-}
-
-function textMessage(role: string, text: string, timestamp: number): AgentMessage {
-	return { role, content: [{ type: "text", text }], timestamp } as AgentMessage;
-}
-
-function projectContext(sessionManager: ExtensionContext["sessionManager"]): ProjectedContext {
-	const branch = sessionManager.getBranch();
-	const items: ContextItem[] = [];
-	const compactedAwayEntryIds = new Set<string>();
-	let compaction: Extract<SessionEntry, { type: "compaction" }> | undefined;
-
-	for (const entry of branch) {
-		if (entry.type === "compaction") compaction = entry;
+function getCoreProjection(ctx: ExtensionContext): CoreSessionProjection {
+	const buildSessionProjection = (ctx.sessionManager as CoreSessionManager).buildSessionProjection;
+	if (!buildSessionProjection) {
+		throw new Error("pi-forget requires a pi build with core context rewrites (buildSessionProjection). Run the rebased pi from source or install that build.");
 	}
+	return buildSessionProjection.call(ctx.sessionManager as CoreSessionManager);
+}
 
-	const appendItem = (entry: SessionEntry) => {
-		if (entry.type === "message") {
-			items.push({ entryId: entry.id, entryType: "message", message: entry.message });
-		} else if (entry.type === "custom_message") {
-			items.push({
-				entryId: entry.id,
-				entryType: "custom_message",
-				message: {
-					role: "custom",
-					customType: entry.customType,
-					content: entry.content,
-					display: entry.display,
-					details: entry.details,
-					timestamp: new Date(entry.timestamp).getTime(),
-				} as AgentMessage,
-			});
-		} else if (entry.type === "branch_summary" && entry.summary) {
-			items.push({
-				entryId: entry.id,
-				entryType: "branch_summary",
-				message: {
-					role: "branchSummary",
-					summary: entry.summary,
-					fromId: entry.fromId,
-					timestamp: new Date(entry.timestamp).getTime(),
-				} as AgentMessage,
-			});
-		}
+function getCorePi(pi: ExtensionAPI): CoreExtensionAPI {
+	const candidate = pi as Partial<CoreExtensionAPI>;
+	if (!candidate.appendContextRewrite || !candidate.undoContextRewrite) {
+		throw new Error("pi-forget requires a pi build with pi.appendContextRewrite() and pi.undoContextRewrite().");
+	}
+	return pi as CoreExtensionAPI;
+}
+
+function itemFromCore(item: CoreProjectionItem): ContextItem {
+	return {
+		entryId: item.entryId,
+		message: item.message,
+		sourceEntryIds: item.sourceEntryIds,
+		rewriteId: item.rewriteId,
 	};
-
-	if (compaction) {
-		items.push({
-			entryId: compaction.id,
-			entryType: "compaction",
-			message: {
-				role: "compactionSummary",
-				summary: compaction.summary,
-				tokensBefore: compaction.tokensBefore,
-				timestamp: new Date(compaction.timestamp).getTime(),
-			} as AgentMessage,
-		});
-
-		const compactionIdx = branch.findIndex((entry) => entry.id === compaction?.id);
-		let foundFirstKept = false;
-		for (let i = 0; i < compactionIdx; i++) {
-			const entry = branch[i]!;
-			if (entry.id === compaction.firstKeptEntryId) foundFirstKept = true;
-			if (foundFirstKept) appendItem(entry);
-			else compactedAwayEntryIds.add(entry.id);
-		}
-		for (let i = compactionIdx + 1; i < branch.length; i++) appendItem(branch[i]!);
-	} else {
-		for (const entry of branch) appendItem(entry);
-	}
-
-	const { prelude, turns } = groupTurns(items);
-	return { branch, items, prelude, turns, compactedAwayEntryIds, activeCompactionId: compaction?.id };
 }
 
-function groupTurns(items: ContextItem[], forgottenEntryIds = new Set<string>()): Pick<ProjectedContext, "prelude" | "turns"> {
+function groupTurns(items: ContextItem[]): { prelude: ContextItem[]; turns: Turn[] } {
 	const prelude: ContextItem[] = [];
 	const turns: Turn[] = [];
 	let current: Turn | undefined;
@@ -149,7 +111,6 @@ function groupTurns(items: ContextItem[], forgottenEntryIds = new Set<string>())
 				startEntryId: item.entryId,
 				entryIds: [item.entryId],
 				items: [item],
-				forgotten: forgottenEntryIds.has(item.entryId),
 			};
 			turns.push(current);
 			continue;
@@ -162,42 +123,8 @@ function groupTurns(items: ContextItem[], forgottenEntryIds = new Set<string>())
 
 		current.items.push(item);
 		current.entryIds.push(item.entryId);
-		if (forgottenEntryIds.has(item.entryId)) current.forgotten = true;
 	}
 	return { prelude, turns };
-}
-
-function getActiveDirectives(ctx: ExtensionContext): ActiveDirective[] {
-	const active = new Map<string, ForgetEntry>();
-	for (const entry of ctx.sessionManager.getBranch()) {
-		if (entry.type !== "custom" || entry.customType !== CUSTOM_TYPE || !isPiForgetEntry(entry.data)) continue;
-		if (entry.data.kind === "forget") {
-			active.set(entry.data.directiveId, entry.data);
-		} else {
-			active.delete(entry.data.directiveId);
-		}
-	}
-	return [...active.values()].map((directive) => ({
-		...directive,
-		entryIdsSet: new Set(directive.entryIds),
-		outputEntryIdsSet: new Set(directive.outputEntryIds ?? []),
-	}));
-}
-
-function getForgottenEntryIds(ctx: ExtensionContext): Set<string> {
-	const ids = new Set<string>();
-	for (const directive of getActiveDirectives(ctx)) {
-		for (const id of directive.entryIds) ids.add(id);
-	}
-	return ids;
-}
-
-function getForgottenOutputEntryIds(ctx: ExtensionContext): Set<string> {
-	const ids = new Set<string>();
-	for (const directive of getActiveDirectives(ctx)) {
-		for (const id of directive.outputEntryIds ?? []) ids.add(id);
-	}
-	return ids;
 }
 
 function parseTurnTarget(target: string): number | undefined {
@@ -219,139 +146,103 @@ function parseOutputTarget(target: string): string | undefined {
 	return match?.[1];
 }
 
-function hasRedactableOutput(item: ContextItem): boolean {
-	return item.message.role === "toolResult" || item.message.role === "bashExecution";
-}
-
 function compactText(text: string, limit = SNIPPET_CHARS): string {
 	const normalized = text.replace(/\s+/g, " ").trim();
 	if (normalized.length <= limit) return normalized;
 	return `${normalized.slice(0, Math.max(0, limit - 1))}…`;
 }
 
-function contentText(content: unknown): string {
+function asContentBlocks(content: unknown): ContentBlock[] {
+	return Array.isArray(content) ? content.filter((block): block is ContentBlock => !!block && typeof block === "object") : [];
+}
+
+function contentText(content: unknown, separator = " "): string {
 	if (typeof content === "string") return content;
-	if (!Array.isArray(content)) return "";
-	return content
-		.filter((block) => block && typeof block === "object" && (block as { type?: string }).type === "text")
-		.map((block) => (block as { text?: string }).text ?? "")
-		.join(" ");
+	return asContentBlocks(content)
+		.filter((block) => block.type === "text")
+		.map((block) => (typeof block.text === "string" ? block.text : ""))
+		.join(separator);
+}
+
+function stringField(record: MessageRecord, key: string): string {
+	const value = record[key];
+	return typeof value === "string" ? value : "";
 }
 
 function summarizeItem(item: ContextItem): string {
-	const msg = item.message as any;
+	const msg = messageRecord(item.message);
 	switch (msg.role) {
 		case "user":
 			return `user ${item.entryId}: "${compactText(contentText(msg.content))}"`;
 		case "assistant": {
-			const blocks = Array.isArray(msg.content) ? msg.content : [];
-			const hasText = blocks.some((block: any) => block.type === "text" && block.text?.trim());
-			const calls = blocks.filter((block: any) => block.type === "toolCall").map((block: any) => block.name || "tool");
+			const blocks = asContentBlocks(msg.content);
+			const hasText = blocks.some((block) => block.type === "text" && typeof block.text === "string" && block.text.trim().length > 0);
+			const calls = blocks
+				.filter((block) => block.type === "toolCall")
+				.map((block) => (typeof block.name === "string" && block.name.length > 0 ? block.name : "tool"));
 			const parts = [hasText ? "text" : undefined, calls.length ? `tool calls: ${calls.join(", ")}` : undefined].filter(Boolean);
 			return `assistant ${item.entryId}: ${parts.join(" + ") || "(empty)"}`;
 		}
 		case "toolResult": {
 			const text = contentText(msg.content);
-			const prefix = msg.toolName ? `${msg.toolName}, ` : "";
+			const toolName = stringField(msg, "toolName");
+			const prefix = toolName ? `${toolName}, ` : "";
 			return `tool ${item.entryId}: ${prefix}${text.length} chars${text ? `, "${compactText(text, 90)}"` : ""}`;
 		}
-		case "custom":
-			return `custom ${item.entryId}: ${msg.customType ?? "custom"}, "${compactText(contentText(msg.content), 90)}"`;
+		case "custom": {
+			const customType = stringField(msg, "customType") || "custom";
+			return `custom ${item.entryId}: ${customType}, "${compactText(contentText(msg.content), 90)}"`;
+		}
 		case "branchSummary":
-			return `branch-summary ${item.entryId}: "${compactText(msg.summary ?? "", 120)}"`;
+			return `branch-summary ${item.entryId}: "${compactText(stringField(msg, "summary"), 120)}"`;
 		case "compactionSummary":
 			return `compaction ${item.entryId}: summary of earlier context (${msg.tokensBefore ?? "?"} tokens before)`;
-		case "bashExecution":
-			return `bashExecution ${item.entryId}: ${msg.command ? `\`${compactText(msg.command, 80)}\`, ` : ""}${(msg.output ?? "").length} chars${msg.output ? `, "${compactText(msg.output, 90)}"` : ""}`;
+		case "bashExecution": {
+			const command = stringField(msg, "command");
+			const output = stringField(msg, "output");
+			return `bashExecution ${item.entryId}: ${command ? `\`${compactText(command, 80)}\`, ` : ""}${output.length} chars${output ? `, "${compactText(output, 90)}"` : ""}`;
+		}
+		case "contextRewrite":
+			return `context-rewrite ${item.rewriteId ?? item.entryId}: "${compactText(stringField(msg, "text"), 120)}"`;
 		default:
 			return `${msg.role ?? "message"} ${item.entryId}`;
 	}
 }
 
-function messageKey(message: AgentMessage): string {
-	const msg = message as any;
+function renderedItemText(item: ContextItem): string {
+	const msg = messageRecord(item.message);
 	switch (msg.role) {
 		case "user":
-			return `user:${JSON.stringify(msg.content)}`;
-		case "assistant":
-			return `assistant:${JSON.stringify(msg.content)}`;
 		case "toolResult":
-			return `toolResult:${msg.toolCallId}:${msg.toolName}:${JSON.stringify(msg.content)}`;
-		case "bashExecution":
-			return `bashExecution:${msg.command}:${msg.output}:${msg.exitCode}:${msg.cancelled}`;
 		case "custom":
-			return `custom:${msg.customType}:${JSON.stringify(msg.content)}`;
+			return contentText(msg.content);
+		case "assistant":
+			return contentText(msg.content, "\n");
+		case "bashExecution":
+			return stringField(msg, "output");
 		case "branchSummary":
-			return `branchSummary:${msg.fromId}:${msg.summary}`;
 		case "compactionSummary":
-			return `compactionSummary:${msg.summary}:${msg.tokensBefore}`;
+			return stringField(msg, "summary");
+		case "contextRewrite":
+			return stringField(msg, "text");
 		default:
-			return `${msg.role}:${JSON.stringify(msg)}`;
+			return "";
 	}
 }
 
-function redactOutput(message: AgentMessage, entryId: string): AgentMessage {
-	const msg = message as any;
-	const text = `[output forgotten by pi-forget: ${entryId}]`;
-	if (msg.role === "toolResult") {
-		return { ...msg, content: [{ type: "text", text }], details: { piForget: { outputForgotten: true, entryId } } } as AgentMessage;
-	}
-	if (msg.role === "bashExecution") {
-		return { ...msg, output: text, truncated: false, fullOutputPath: undefined } as AgentMessage;
-	}
-	return message;
+function outputSurfaceText(item: ContextItem): string | undefined {
+	const msg = messageRecord(item.message);
+	if (msg.role === "bashExecution") return stringField(msg, "output");
+	if (msg.role === "toolResult") return contentText(msg.content);
+	return undefined;
 }
 
-function filterWithProjection(
-	messages: AgentMessage[],
-	items: ContextItem[],
-	forgotten: Set<string>,
-	forgottenOutputs = new Set<string>(),
-): { messages: AgentMessage[]; aligned: boolean } {
-	const filtered: AgentMessage[] = [];
-	let itemIndex = 0;
-	let aligned = true;
-
-	for (const message of messages) {
-		const key = messageKey(message);
-		const item = items[itemIndex];
-		if (item && messageKey(item.message) === key) {
-			if (!forgotten.has(item.entryId)) {
-				filtered.push(forgottenOutputs.has(item.entryId) ? redactOutput(message, item.entryId) : message);
-			}
-			itemIndex++;
-			continue;
-		}
-
-		// During tool follow-up turns, agent.state can be one message ahead of the
-		// session branch. Keep unmatched in-flight messages rather than failing the
-		// whole filter.
-		aligned = false;
-		filtered.push(message);
-	}
-
-	if (itemIndex < items.length) aligned = false;
-	return { messages: filtered, aligned };
-}
-
-function formatContextIndex(ctx: ExtensionContext, scope: "recent" | "all", limit: number): string {
-	const projection = projectContext(ctx.sessionManager);
-	const forgotten = getForgottenEntryIds(ctx);
-	const forgottenOutputs = getForgottenOutputEntryIds(ctx);
-	const { prelude, turns } = groupTurns(projection.items, forgotten);
-	const visibleTurns = turns.filter((turn) => !turn.entryIds.every((id) => forgotten.has(id)));
-	const selectedTurns = scope === "all" ? visibleTurns.slice(-limit) : visibleTurns.slice(-limit);
+function formatProjectedContext(prelude: ContextItem[], turns: Turn[], scope: "recent" | "all", limit: number): string {
+	const selectedTurns = scope === "all" ? turns.slice(0, limit) : turns.slice(-limit);
 	const lines: string[] = ["Current provider-visible context:", ""];
 
-	const visiblePrelude = prelude.filter((item) => !forgotten.has(item.entryId));
-	if (visiblePrelude.length) {
-		for (const item of visiblePrelude) lines.push(forgottenOutputs.has(item.entryId) ? `${summarizeItem(item)} [output forgotten]` : summarizeItem(item));
-		lines.push("");
-	}
-	if (projection.activeCompactionId) {
-		lines.push(
-			`Active compaction ${projection.activeCompactionId} summarizes earlier history. Entries behind it are not individually forgettable in MVP.`,
-		);
+	if (prelude.length) {
+		for (const item of prelude) lines.push(summarizeItem(item));
 		lines.push("");
 	}
 
@@ -362,23 +253,33 @@ function formatContextIndex(ctx: ExtensionContext, scope: "recent" | "all", limi
 
 	for (const turn of selectedTurns) {
 		lines.push(`turn:${turn.number}`);
-		for (const item of turn.items) {
-			if (!forgotten.has(item.entryId)) {
-				lines.push(`  ${forgottenOutputs.has(item.entryId) ? `${summarizeItem(item)} [output forgotten]` : summarizeItem(item)}`);
-			}
-		}
+		for (const item of turn.items) lines.push(`  ${summarizeItem(item)}`);
 		lines.push("");
 	}
 
-	if (visibleTurns.length > selectedTurns.length) {
-		lines.push(`Showing ${selectedTurns.length} of ${visibleTurns.length} visible turns. Use scope:"all" or a higher limit for more.`);
+	if (turns.length > selectedTurns.length) {
+		lines.push(
+			scope === "all"
+				? `Showing first ${selectedTurns.length} of ${turns.length} visible turns. Use a higher limit for more.`
+				: `Showing last ${selectedTurns.length} of ${turns.length} visible turns. Use scope:"all" or a higher limit for more.`,
+		);
 	}
 	return lines.join("\n").trimEnd();
 }
 
-function makeDirectiveId(existingCount: number): string {
+function formatContextIndex(ctx: ExtensionContext, scope: "recent" | "all", limit: number): string {
+	const items = getCoreProjection(ctx).items.map(itemFromCore);
+	const { prelude, turns } = groupTurns(items);
+	return formatProjectedContext(prelude, turns, scope, limit);
+}
+
+function makeRewriteId(existingCount: number): string {
 	const rand = Math.random().toString(16).slice(2, 6);
 	return `forget-${String(existingCount + 1).padStart(3, "0")}-${rand}`;
+}
+
+function isPiForgetRewrite(rewrite: CoreContextRewriteEntry): boolean {
+	return !!rewrite.details && typeof rewrite.details === "object" && "piForget" in rewrite.details;
 }
 
 function createForgetDirective(
@@ -386,121 +287,105 @@ function createForgetDirective(
 	ctx: ExtensionContext,
 	targets: string[],
 	reason?: string,
-): { text: string; details: Record<string, unknown> | ForgetEntry } {
-	const projection = projectContext(ctx.sessionManager);
-	const active = getActiveDirectives(ctx);
-	const alreadyForgotten = new Set<string>();
-	const alreadyOutputForgotten = new Set<string>();
-	for (const directive of active) {
-		for (const id of directive.entryIds) alreadyForgotten.add(id);
-		for (const id of directive.outputEntryIds ?? []) alreadyOutputForgotten.add(id);
-	}
-
-	const turnNumbers: number[] = [];
-	const entryIds: string[] = [];
-	const outputEntryIds: string[] = [];
-	const latestTurn = projection.turns.at(-1)?.number;
+): { text: string; details: Record<string, unknown> } {
+	const projection = getCoreProjection(ctx);
+	const corePi = getCorePi(pi);
+	const items = projection.items.map(itemFromCore);
+	const { turns } = groupTurns(items);
+	const latestTurn = turns.at(-1)?.number;
+	const activePiForgetCount = projection.activeRewrites.filter(isPiForgetRewrite).length;
+	const baseRewriteId = makeRewriteId(activePiForgetCount);
+	const rewriteInputs: CoreContextRewriteInput[] = [];
+	const targetLabels: string[] = [];
 
 	for (const target of targets) {
 		const turnNumber = parseTurnTarget(target);
 		if (turnNumber !== undefined) {
-			const turn = projection.turns.find((candidate) => candidate.number === turnNumber);
+			const turn = turns.find((candidate) => candidate.number === turnNumber);
 			if (!turn) return { text: `Unknown ${target}. Run list_context for current turn numbers.`, details: { error: "unknown_turn", target } };
 			if (turnNumber === latestTurn) {
-				return {
-					text: `Refusing to forget ${target}: MVP does not forget the current/latest turn.`,
-					details: { error: "latest_turn", target },
-				};
+				return { text: `Refusing to forget ${target}: pi-forget does not forget the current/latest turn.`, details: { error: "latest_turn", target } };
 			}
-			turnNumbers.push(turnNumber);
-			for (const id of turn.entryIds) if (!entryIds.includes(id)) entryIds.push(id);
+			const first = turn.items[0]?.sourceEntryIds[0] ?? turn.items[0]?.entryId;
+			const lastItem = turn.items.at(-1);
+			const last = lastItem?.sourceEntryIds.at(-1) ?? lastItem?.entryId;
+			if (!first || !last) return { text: `Could not resolve ${target} to source entries.`, details: { error: "unresolved_turn", target } };
+			const before = turn.items.map(renderedItemText).join("\n");
+			rewriteInputs.push({
+				rewriteId: rewriteInputs.length === 0 ? baseRewriteId : `${baseRewriteId}-${rewriteInputs.length + 1}`,
+				target: { kind: "range", fromEntryId: first, toEntryId: last },
+				beforeHash: hashContextText(before),
+				after: `[context forgotten by pi-forget: ${target}]`,
+				reason,
+				details: { piForget: { targets, reason } },
+			});
+			targetLabels.push(target);
 			continue;
 		}
 
 		const outputEntryId = parseOutputTarget(target);
 		if (outputEntryId !== undefined) {
-			const item = projection.items.find((candidate) => candidate.entryId === outputEntryId);
+			const item = items.find((candidate) => candidate.entryId === outputEntryId || candidate.sourceEntryIds.includes(outputEntryId));
 			if (!item) return { text: `Unknown output entry ${outputEntryId}. Run list_context for current visible entries.`, details: { error: "unknown_output", target } };
-			if (!hasRedactableOutput(item)) {
-				return { text: `Entry ${outputEntryId} has no separable tool output to forget. Use entry:${outputEntryId} to omit the whole entry.`, details: { error: "not_redactable", target } };
-			}
-			if (!outputEntryIds.includes(outputEntryId)) outputEntryIds.push(outputEntryId);
+			const output = outputSurfaceText(item);
+			if (output === undefined) return { text: `Entry ${outputEntryId} has no separable output to forget.`, details: { error: "not_redactable", target } };
+			rewriteInputs.push({
+				rewriteId: rewriteInputs.length === 0 ? baseRewriteId : `${baseRewriteId}-${rewriteInputs.length + 1}`,
+				target: { kind: "surface", entryId: outputEntryId, surface: "output" },
+				beforeHash: hashContextText(output),
+				after: `[output forgotten by pi-forget: ${outputEntryId}]`,
+				reason,
+				details: { piForget: { targets, reason } },
+			});
+			targetLabels.push(target);
 			continue;
 		}
 
 		const entryId = parseEntryTarget(target);
 		if (entryId !== undefined) {
-			const item = projection.items.find((candidate) => candidate.entryId === entryId);
+			const item = items.find((candidate) => candidate.entryId === entryId || candidate.sourceEntryIds.includes(entryId));
 			if (!item) return { text: `Unknown entry ${entryId}. Run list_context for current visible entries.`, details: { error: "unknown_entry", target } };
-			if (!entryIds.includes(entryId)) entryIds.push(entryId);
+			const before = renderedItemText(item);
+			rewriteInputs.push({
+				rewriteId: rewriteInputs.length === 0 ? baseRewriteId : `${baseRewriteId}-${rewriteInputs.length + 1}`,
+				target: { kind: "surface", entryId, surface: "rendered" },
+				beforeHash: hashContextText(before),
+				after: `[entry forgotten by pi-forget: ${entryId}]`,
+				reason,
+				details: { piForget: { targets, reason } },
+			});
+			targetLabels.push(target);
 			continue;
 		}
 
-		return {
-			text: `Invalid target ${target}. Use turn:N, entry:<id>, or output:<id> from list_context.`,
-			details: { error: "invalid_target", target },
-		};
+		return { text: `Invalid target ${target}. Use turn:N, entry:<id>, or output:<id> from list_context.`, details: { error: "invalid_target", target } };
 	}
 
-	const newEntryIds = entryIds.filter((id) => !alreadyForgotten.has(id));
-	const newOutputEntryIds = outputEntryIds.filter((id) => !alreadyOutputForgotten.has(id) && !alreadyForgotten.has(id) && !newEntryIds.includes(id));
-	if (!newEntryIds.length && !newOutputEntryIds.length) {
-		return { text: "Those targets are already forgotten on this branch.", details: { alreadyForgotten: true } };
-	}
-
-	const visibleTurnCountAfter = projection.turns.filter((turn) =>
-		!turn.entryIds.every((id) => alreadyForgotten.has(id) || newEntryIds.includes(id)),
-	).length;
-	if (newEntryIds.length && visibleTurnCountAfter === 0) {
-		return { text: "Refusing to forget all visible turns; keep at least one turn in context.", details: { error: "would_forget_all" } };
-	}
-
-	const directive: ForgetEntry = {
-		kind: "forget",
-		directiveId: makeDirectiveId(active.length),
-		targets: [...targets],
-		turnNumbers: [...new Set(turnNumbers)],
-		entryIds: newEntryIds,
-		outputEntryIds: newOutputEntryIds,
-		reason,
-		createdAt: Date.now(),
-		createdAtLeafId: ctx.sessionManager.getLeafId(),
-		projectionVersion: PROJECTION_VERSION,
-	};
-	pi.appendEntry(CUSTOM_TYPE, directive);
+	const entryIds = rewriteInputs.map((rewrite) => corePi.appendContextRewrite(rewrite));
 	return {
-		text: `Forgot ${directive.targets.join(", ")} (${newEntryIds.length} entries omitted, ${newOutputEntryIds.length} outputs redacted). Original session history is unchanged. Use /unforget ${directive.directiveId} to restore.`,
-		details: directive,
+		text: `Applied context rewrite${entryIds.length === 1 ? "" : "s"} ${rewriteInputs.map((rewrite) => rewrite.rewriteId).join(", ")} for ${targetLabels.join(", ")}. Original session history is unchanged. Use /unforget <rewrite-id> to restore.`,
+		details: { rewriteIds: rewriteInputs.map((rewrite) => rewrite.rewriteId), entryIds, targets: targetLabels },
 	};
 }
 
-function formatDirective(directive: ActiveDirective): string {
-	const entries = directive.entryIds.length
-		? directive.entryIds.length === 1
-			? directive.entryIds[0]
-			: `${directive.entryIds[0]}..${directive.entryIds[directive.entryIds.length - 1]}`
-		: "(none)";
-	const outputs = directive.outputEntryIds?.length
-		? directive.outputEntryIds.length === 1
-			? directive.outputEntryIds[0]
-			: `${directive.outputEntryIds[0]}..${directive.outputEntryIds[directive.outputEntryIds.length - 1]}`
-		: "(none)";
+function formatCoreRewrite(rewrite: CoreContextRewriteEntry): string {
 	return [
-		directive.directiveId,
-		`  targets: ${directive.targets.join(", ")}`,
-		`  entries: ${entries}`,
-		`  outputs: ${outputs}`,
-		directive.reason ? `  reason: ${directive.reason}` : undefined,
-	].filter(Boolean).join("\n");
+		rewrite.rewriteId ?? rewrite.id,
+		`  target: ${JSON.stringify(rewrite.target)}`,
+		`  replacement: "${compactText(rewrite.after, 120)}"`,
+		rewrite.reason ? `  reason: ${rewrite.reason}` : undefined,
+	]
+		.filter(Boolean)
+		.join("\n");
 }
 
 export default function piForget(pi: ExtensionAPI) {
-	let warnedAboutAlignment = false;
+	getCorePi(pi);
 
 	pi.registerTool({
 		name: "list_context",
 		label: "List Context",
-		description: "List provider-visible conversation turns with stable turn numbers for the forget tool.",
+		description: "List provider-visible context turns with stable turn numbers for the forget tool.",
 		promptSnippet: "List provider-visible context turns that can be forgotten by turn:N",
 		promptGuidelines: [
 			"Use list_context before forget when you need to identify stale or irrelevant prior turns.",
@@ -522,7 +407,9 @@ export default function piForget(pi: ExtensionAPI) {
 		label: "Forget",
 		description: "Omit provider-visible turns/specific entries, or redact tool output while preserving the tool call, from future provider requests.",
 		promptSnippet: "Forget stale context by turn:N, entry:<id>, or output:<id> from list_context",
-		promptGuidelines: ["Use forget with turn:N, entry:<id>, or output:<id> targets from list_context. Use output:<id> when only a tool result's output should be hidden while preserving the tool call."],
+		promptGuidelines: [
+			"Use forget with turn:N, entry:<id>, or output:<id> targets from list_context. Use output:<id> when only a tool result's output should be hidden while preserving the tool call.",
+		],
 		parameters: Type.Object({
 			targets: Type.Array(Type.String({ description: "Targets to forget: turn:N, entry:<id>, or output:<id>." }), {
 				minItems: 1,
@@ -533,22 +420,6 @@ export default function piForget(pi: ExtensionAPI) {
 			const result = createForgetDirective(pi, ctx, params.targets, params.reason);
 			return { content: [{ type: "text", text: result.text }], details: result.details };
 		},
-	});
-
-	pi.on("context", async (event, ctx) => {
-		const forgotten = getForgottenEntryIds(ctx);
-		const forgottenOutputs = getForgottenOutputEntryIds(ctx);
-		if (!forgotten.size && !forgottenOutputs.size) return;
-		const projection = projectContext(ctx.sessionManager);
-		const result = filterWithProjection(event.messages, projection.items, forgotten, forgottenOutputs);
-		if (!result.aligned && !warnedAboutAlignment) {
-			warnedAboutAlignment = true;
-			ctx.ui.notify(
-				`pi-forget: context had in-flight/unprojected messages (${event.messages.length} messages vs ${projection.items.length} projected); filtered matched entries and kept unmatched messages.`,
-				"warning",
-			);
-		}
-		return { messages: result.messages };
 	});
 
 	pi.registerCommand("forget", {
@@ -565,34 +436,46 @@ export default function piForget(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("forgotten", {
-		description: "Show active pi-forget directives on the current branch",
+		description: "Show active pi-forget context rewrites on the current branch",
 		handler: async (_args, ctx) => {
-			const directives = getActiveDirectives(ctx);
+			const rewrites = getCoreProjection(ctx).activeRewrites.filter(isPiForgetRewrite);
 			ctx.ui.notify(
-				directives.length ? `Active forget directives:\n\n${directives.map(formatDirective).join("\n\n")}` : "No active forget directives on this branch.",
+				rewrites.length ? `Active context rewrites:\n\n${rewrites.map(formatCoreRewrite).join("\n\n")}` : "No active pi-forget context rewrites on this branch.",
 				"info",
 			);
 		},
 	});
 
 	pi.registerCommand("unforget", {
-		description: "Restore context hidden by a pi-forget directive: /unforget <directive-id>",
+		description: "Restore context hidden by a pi-forget rewrite: /unforget <rewrite-id>",
 		handler: async (args, ctx) => {
-			const directiveId = args.trim();
-			if (!directiveId) {
-				ctx.ui.notify("Usage: /unforget <directive-id>", "warning");
+			const rewriteId = args.trim();
+			if (!rewriteId) {
+				ctx.ui.notify("Usage: /unforget <rewrite-id>", "warning");
 				return;
 			}
-			const directives = getActiveDirectives(ctx);
-			if (!directives.some((directive) => directive.directiveId === directiveId)) {
-				ctx.ui.notify(`No active forget directive found for ${directiveId}.`, "warning");
+
+			const projection = getCoreProjection(ctx);
+			if (!projection.activeRewrites.some((rewrite) => (rewrite.rewriteId ?? rewrite.id) === rewriteId)) {
+				ctx.ui.notify(`No active context rewrite found for ${rewriteId}.`, "warning");
 				return;
 			}
-			const entry: UnforgetEntry = { kind: "unforget", directiveId, createdAt: Date.now(), createdAtLeafId: ctx.sessionManager.getLeafId() };
-			pi.appendEntry(CUSTOM_TYPE, entry);
-			ctx.ui.notify(`Restored context for ${directiveId}.`, "info");
+			getCorePi(pi).undoContextRewrite(rewriteId);
+			ctx.ui.notify(`Restored context for ${rewriteId}.`, "info");
 		},
 	});
 }
 
-export const __test = { projectContext, groupTurns, getActiveDirectives, parseTurnTarget, parseEntryTarget, parseOutputTarget, formatContextIndex, filterWithProjection, redactOutput };
+export const __test = {
+	contentText,
+	createForgetDirective,
+	formatContextIndex,
+	formatProjectedContext,
+	groupTurns,
+	hashContextText,
+	parseEntryTarget,
+	parseOutputTarget,
+	parseTurnTarget,
+	renderedItemText,
+	summarizeItem,
+};

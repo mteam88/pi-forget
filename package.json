@@ -3,6 +3,10 @@
   "version": "0.1.0",
   "type": "module",
   "description": "A pi extension for reversible, branch-local context forgetting.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mteam88/pi-forget.git"
+  },
   "keywords": ["pi-package", "pi", "extension", "context"],
   "pi": {
     "extensions": ["./index.ts"]

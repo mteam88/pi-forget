@@ -1,3 +1,5 @@
 node_modules/
 .DS_Store
 pi-mono/
+out.jsonl
+pi-session-*.html
