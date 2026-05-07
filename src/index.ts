@@ -514,10 +514,11 @@ export default function piForget(pi: ExtensionAPI) {
 		name: "list_context",
 		label: "List Context",
 		description: "List provider-visible context turns with stable turn numbers for the forget tool.",
-		promptSnippet: "List provider-visible context turns that can be forgotten by turn:N",
+		promptSnippet: "List provider-visible context turns and output targets that can be passed to forget",
 		promptGuidelines: [
-			"Use list_context before forget when you need to identify stale or irrelevant prior turns.",
-			"Use forget only with turn:N targets returned by list_context.",
+			"Use list_context before forget when asked to trim, clean up, or forget stale context.",
+			"For routine cleanup, first call list_context({detail:\"summary\"}). If output chars are high, call list_context({detail:\"outputs\", minChars:2000, maxOutputs:12, excludeLatestTurns:1}) and pass the generated output:<id> targets to forget.",
+			"Use detail:\"entries\" with turn:N when deciding whether a whole completed turn can be summarized and forgotten.",
 		],
 		parameters: Type.Object({
 			scope: Type.Optional(Type.Union([Type.Literal("recent"), Type.Literal("all")], { default: "recent" })),
@@ -556,7 +557,10 @@ export default function piForget(pi: ExtensionAPI) {
 			"Omit stale provider-visible turns/specific entries, or redact bulky tool output while preserving the tool call, from future provider requests. This is for context-budget cleanup, not security: it does not delete session history, scrub logs, or safely handle leaked secrets/tokens.",
 		promptSnippet: "Forget stale context by turn:N, entry:<id>, or output:<id> from list_context",
 		promptGuidelines: [
-			"Use forget with turn:N, entry:<id>, or output:<id> targets from list_context. Use output:<id> when only a tool result's output should be hidden while preserving the tool call.",
+			"Use forget with turn:N, entry:<id>, or output:<id> targets returned by list_context.",
+			"Prefer output:<id> for bulky tool/read/bash/list_context output so useful surrounding conversation remains visible.",
+			"Prefer turn:N with replacement for completed stale work that can be collapsed into a concise summary.",
+			"Do not forget the current/latest turn; keep the active user request and current work visible.",
 			"Do not use forget as a security/privacy mechanism for sensitive tokens, credentials, or secrets. It only changes future provider-visible context; it does not erase the append-only session history or other copies.",
 		],
 		parameters: Type.Object({

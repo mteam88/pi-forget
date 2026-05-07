@@ -31,9 +31,17 @@ Largest forgettable outputs:
   output:fde92dfa  bashExecution, 12000 chars, "..."
 ```
 
+For routine cleanup, start with the default summary. If output chars are high, search explicit output targets:
+
+```ts
+list_context({ detail: "outputs", minChars: 2000, maxOutputs: 12, excludeLatestTurns: 1 })
+```
+
 Use `detail:"entries"` with `turn:N` to expand one turn, or `detail:"outputs"` to search output redaction targets. Output search supports `minChars`, `maxOutputs`, `query`, and `excludeLatestTurns`, and prints a ready-to-run `forget({ targets: [...] })` snippet.
 
 ### `forget`
+
+Prefer `output:<id>` for bulky tool/read/bash/list_context output so the surrounding conversation stays visible. Prefer `turn:N` with `replacement` for completed stale work that can be collapsed into a summary. Do not forget the current/latest turn.
 
 Forget a whole visible turn:
 
