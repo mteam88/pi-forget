@@ -449,14 +449,16 @@ function createForgetDirective(
 
 		const outputEntryId = parseOutputTarget(target);
 		if (outputEntryId !== undefined) {
-			const item = items.find((candidate) => candidate.entryId === outputEntryId || candidate.sourceEntryIds.includes(outputEntryId));
-			if (!item) return { text: `Unknown output entry ${outputEntryId}. Run list_context for current visible entries.`, details: { error: "unknown_output", target } };
-			const output = outputSurfaceText(item);
-			if (output === undefined) return { text: `Entry ${outputEntryId} has no separable output to forget.`, details: { error: "not_redactable", target } };
+			const matches = items.filter((candidate) => candidate.entryId === outputEntryId || candidate.sourceEntryIds.includes(outputEntryId));
+			if (!matches.length) return { text: `Unknown output entry ${outputEntryId}. Run list_context for current visible entries.`, details: { error: "unknown_output", target } };
+			const item = matches.find((candidate) => outputSurfaceText(candidate) !== undefined);
+			if (!item) return { text: `Entry ${outputEntryId} has no separable output to forget.`, details: { error: "not_redactable", target } };
+			const output = outputSurfaceText(item) ?? "";
+			const rewriteEntryId = item.entryId === outputEntryId ? outputEntryId : (item.sourceEntryIds.find((id) => id === outputEntryId) ?? item.entryId);
 			const after = replacementFor("output", outputEntryId, replacement);
 			rewriteInputs.push({
 				rewriteId: rewriteInputs.length === 0 ? baseRewriteId : `${baseRewriteId}-${rewriteInputs.length + 1}`,
-				target: { kind: "surface", entryId: outputEntryId, surface: "output" },
+				target: { kind: "surface", entryId: rewriteEntryId, surface: "output" },
 				beforeHash: hashContextText(output),
 				after,
 				reason,

@@ -157,6 +157,20 @@ function makePi(): any {
 {
 	const pi = makePi();
 	const ctx = makeCtx([
+		{ entryId: "rewrite1", sourceEntryIds: ["bash12345"], message: { role: "contextRewrite", text: "summary" } },
+		{ entryId: "bash12345", sourceEntryIds: ["bash12345"], message: bash("printf secret", "SECRET OUTPUT") },
+		{ entryId: "u2", sourceEntryIds: ["u2"], message: user("current") },
+	]);
+	const result = __test.createForgetDirective(pi, ctx, ["output:bash12345"], "large");
+	assert.match(result.text, /output:bash12345/);
+	assert.equal(pi.rewrites.length, 1);
+	assert.deepEqual(pi.rewrites[0].target, { kind: "surface", entryId: "bash12345", surface: "output" });
+	assert.equal(pi.rewrites[0].beforeHash, __test.hashContextText("SECRET OUTPUT"));
+}
+
+{
+	const pi = makePi();
+	const ctx = makeCtx([
 		{ entryId: "u1", sourceEntryIds: ["u1"], message: user("secret context") },
 		{ entryId: "u2", sourceEntryIds: ["u2"], message: user("current") },
 	]);
