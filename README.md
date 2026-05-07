@@ -41,6 +41,16 @@ Forget a whole visible turn:
 forget({ targets: ["turn:1"], reason: "obsolete debugging path" })
 ```
 
+Or replace it with a short summary:
+
+```ts
+forget({
+  targets: ["turn:1"],
+  reason: "collapse completed setup work",
+  replacement: "[summary: rebased pi-mono fork, pushed branch, installed pi-forget from GitHub]"
+})
+```
+
 Forget a specific visible entry:
 
 ```ts
@@ -53,7 +63,7 @@ Redact only a tool output while preserving the surrounding tool context:
 forget({ targets: ["output:fde92dfa"], reason: "huge command output" })
 ```
 
-`output:<id>` applies to `toolResult` and `bashExecution` entries. The original session entries remain unchanged; `pi-forget` appends `context_rewrite` entries.
+`output:<id>` applies to `toolResult` and `bashExecution` entries. `replacement` is optional for any target and is useful when collapsing a turn into a concise summary. The original session entries remain unchanged; `pi-forget` appends `context_rewrite` entries.
 
 ## Slash commands
 

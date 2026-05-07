@@ -391,11 +391,24 @@ function isPiForgetRewrite(rewrite: CoreContextRewriteEntry): boolean {
 	return !!rewrite.details && typeof rewrite.details === "object" && "piForget" in rewrite.details;
 }
 
+function replacementFor(kind: "context" | "entry" | "output", label: string, replacement?: string): string {
+	if (replacement !== undefined) return replacement;
+	switch (kind) {
+		case "context":
+			return `[context forgotten by pi-forget: ${label}]`;
+		case "entry":
+			return `[entry forgotten by pi-forget: ${label}]`;
+		case "output":
+			return `[output forgotten by pi-forget: ${label}]`;
+	}
+}
+
 function createForgetDirective(
 	pi: ExtensionAPI,
 	ctx: ExtensionContext,
 	targets: string[],
 	reason?: string,
+	replacement?: string,
 ): { text: string; details: Record<string, unknown> } {
 	const projection = getCoreProjection(ctx);
 	const corePi = getCorePi(pi);
@@ -406,6 +419,7 @@ function createForgetDirective(
 	const baseRewriteId = makeRewriteId(activePiForgetCount);
 	const rewriteInputs: CoreContextRewriteInput[] = [];
 	const targetLabels: string[] = [];
+	const sharedReplacement = replacement !== undefined && targets.length > 1;
 
 	for (const target of targets) {
 		const turnNumber = parseTurnTarget(target);
@@ -420,13 +434,14 @@ function createForgetDirective(
 			const last = lastItem?.sourceEntryIds.at(-1) ?? lastItem?.entryId;
 			if (!first || !last) return { text: `Could not resolve ${target} to source entries.`, details: { error: "unresolved_turn", target } };
 			const before = turn.items.map(renderedItemText).join("\n");
+			const after = replacementFor("context", target, replacement);
 			rewriteInputs.push({
 				rewriteId: rewriteInputs.length === 0 ? baseRewriteId : `${baseRewriteId}-${rewriteInputs.length + 1}`,
 				target: { kind: "range", fromEntryId: first, toEntryId: last },
 				beforeHash: hashContextText(before),
-				after: `[context forgotten by pi-forget: ${target}]`,
+				after,
 				reason,
-				details: { piForget: { targets, reason } },
+				details: { piForget: { targets, reason, replacement: replacement ?? undefined } },
 			});
 			targetLabels.push(target);
 			continue;
@@ -438,13 +453,14 @@ function createForgetDirective(
 			if (!item) return { text: `Unknown output entry ${outputEntryId}. Run list_context for current visible entries.`, details: { error: "unknown_output", target } };
 			const output = outputSurfaceText(item);
 			if (output === undefined) return { text: `Entry ${outputEntryId} has no separable output to forget.`, details: { error: "not_redactable", target } };
+			const after = replacementFor("output", outputEntryId, replacement);
 			rewriteInputs.push({
 				rewriteId: rewriteInputs.length === 0 ? baseRewriteId : `${baseRewriteId}-${rewriteInputs.length + 1}`,
 				target: { kind: "surface", entryId: outputEntryId, surface: "output" },
 				beforeHash: hashContextText(output),
-				after: `[output forgotten by pi-forget: ${outputEntryId}]`,
+				after,
 				reason,
-				details: { piForget: { targets, reason } },
+				details: { piForget: { targets, reason, replacement: replacement ?? undefined } },
 			});
 			targetLabels.push(target);
 			continue;
@@ -455,13 +471,14 @@ function createForgetDirective(
 			const item = items.find((candidate) => candidate.entryId === entryId || candidate.sourceEntryIds.includes(entryId));
 			if (!item) return { text: `Unknown entry ${entryId}. Run list_context for current visible entries.`, details: { error: "unknown_entry", target } };
 			const before = renderedItemText(item);
+			const after = replacementFor("entry", entryId, replacement);
 			rewriteInputs.push({
 				rewriteId: rewriteInputs.length === 0 ? baseRewriteId : `${baseRewriteId}-${rewriteInputs.length + 1}`,
 				target: { kind: "surface", entryId, surface: "rendered" },
 				beforeHash: hashContextText(before),
-				after: `[entry forgotten by pi-forget: ${entryId}]`,
+				after,
 				reason,
-				details: { piForget: { targets, reason } },
+				details: { piForget: { targets, reason, replacement: replacement ?? undefined } },
 			});
 			targetLabels.push(target);
 			continue;
@@ -472,8 +489,8 @@ function createForgetDirective(
 
 	const entryIds = rewriteInputs.map((rewrite) => corePi.appendContextRewrite(rewrite));
 	return {
-		text: `Applied context rewrite${entryIds.length === 1 ? "" : "s"} ${rewriteInputs.map((rewrite) => rewrite.rewriteId).join(", ")} for ${targetLabels.join(", ")}. Original session history is unchanged. Use /unforget <rewrite-id> to restore.`,
-		details: { rewriteIds: rewriteInputs.map((rewrite) => rewrite.rewriteId), entryIds, targets: targetLabels },
+		text: `Applied context rewrite${entryIds.length === 1 ? "" : "s"} ${rewriteInputs.map((rewrite) => rewrite.rewriteId).join(", ")} for ${targetLabels.join(", ")}${replacement !== undefined ? ` using ${sharedReplacement ? "the same replacement" : "custom replacement text"}` : ""}. Original session history is unchanged. Use /unforget <rewrite-id> to restore.`,
+		details: { rewriteIds: rewriteInputs.map((rewrite) => rewrite.rewriteId), entryIds, targets: targetLabels, replacementApplied: replacement !== undefined },
 	};
 }
 
@@ -543,9 +560,15 @@ export default function piForget(pi: ExtensionAPI) {
 				minItems: 1,
 			}),
 			reason: Type.Optional(Type.String({ description: "Why this context should be omitted." })),
+			replacement: Type.Optional(
+				Type.String({
+					description:
+						"Optional replacement/summary text to show in future context instead of the default pi-forget placeholder. For multiple targets, the same replacement is applied to each target.",
+				}),
+			),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const result = createForgetDirective(pi, ctx, params.targets, params.reason);
+			const result = createForgetDirective(pi, ctx, params.targets, params.reason, params.replacement);
 			return { content: [{ type: "text", text: result.text }], details: result.details };
 		},
 	});

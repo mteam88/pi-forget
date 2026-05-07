@@ -120,11 +120,11 @@ function makePi(): any {
 		{ entryId: "a1", sourceEntryIds: ["a1"], message: assistant("old answer") },
 		{ entryId: "u2", sourceEntryIds: ["u2"], message: user("current") },
 	]);
-	const result = __test.createForgetDirective(pi, ctx, ["turn:1"], "obsolete");
+	const result = __test.createForgetDirective(pi, ctx, ["turn:1"], "obsolete", "[summary: old work completed]");
 	assert.match(result.text, /Applied context rewrite/);
 	assert.equal(pi.rewrites.length, 1);
 	assert.deepEqual(pi.rewrites[0].target, { kind: "range", fromEntryId: "u1", toEntryId: "a1" });
-	assert.equal(pi.rewrites[0].after, "[context forgotten by pi-forget: turn:1]");
+	assert.equal(pi.rewrites[0].after, "[summary: old work completed]");
 	assert.equal(pi.rewrites[0].reason, "obsolete");
 	assert.match(pi.rewrites[0].beforeHash, /^sha256:/);
 }
