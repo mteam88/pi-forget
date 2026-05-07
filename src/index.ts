@@ -552,10 +552,12 @@ export default function piForget(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "forget",
 		label: "Forget",
-		description: "Omit provider-visible turns/specific entries, or redact tool output while preserving the tool call, from future provider requests.",
+		description:
+			"Omit stale provider-visible turns/specific entries, or redact bulky tool output while preserving the tool call, from future provider requests. This is for context-budget cleanup, not security: it does not delete session history, scrub logs, or safely handle leaked secrets/tokens.",
 		promptSnippet: "Forget stale context by turn:N, entry:<id>, or output:<id> from list_context",
 		promptGuidelines: [
 			"Use forget with turn:N, entry:<id>, or output:<id> targets from list_context. Use output:<id> when only a tool result's output should be hidden while preserving the tool call.",
+			"Do not use forget as a security/privacy mechanism for sensitive tokens, credentials, or secrets. It only changes future provider-visible context; it does not erase the append-only session history or other copies.",
 		],
 		parameters: Type.Object({
 			targets: Type.Array(Type.String({ description: "Targets to forget: turn:N, entry:<id>, or output:<id>." }), {
@@ -576,7 +578,7 @@ export default function piForget(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("forget", {
-		description: "Forget provider-visible turns, entries, or outputs: /forget turn:N|entry:id|output:id [reason]",
+		description: "Forget stale provider-visible turns, entries, or outputs for context cleanup only: /forget turn:N|entry:id|output:id [reason]",
 		handler: async (args, ctx) => {
 			const [target, ...reasonParts] = args.trim().split(/\s+/).filter(Boolean);
 			if (!target) {

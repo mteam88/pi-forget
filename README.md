@@ -2,7 +2,7 @@
 
 A pi extension for reversible, branch-local context forgetting.
 
-`pi-forget` lets the model omit stale prior turns from future provider requests without deleting or rewriting JSONL session history.
+`pi-forget` lets the model omit stale prior turns from future provider requests without deleting or rewriting JSONL session history. It is a context-budget cleanup tool, not a security/privacy tool: it does not erase session history, logs, or other copies of leaked secrets/tokens.
 
 It requires a pi build with native `context_rewrite` support. Rewrites are append-only and branch-local, so provider requests, compaction, reloads, and context accounting share the same effective context.
 
@@ -64,6 +64,8 @@ forget({ targets: ["output:fde92dfa"], reason: "huge command output" })
 ```
 
 `output:<id>` applies to `toolResult` and `bashExecution` entries. `replacement` is optional for any target and is useful when collapsing a turn into a concise summary. The original session entries remain unchanged; `pi-forget` appends `context_rewrite` entries.
+
+Do not use `forget` to handle sensitive tokens, credentials, or secrets. Rotate/revoke secrets and clean the underlying storage/logs instead.
 
 ## Slash commands
 
