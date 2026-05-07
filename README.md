@@ -22,13 +22,16 @@ https://github.com/mteam88/pi-mono/tree/context-rewrites-for-pi-forget
 
 ### `list_context`
 
-Lists provider-visible turns with stable targets:
+Lists provider-visible turns with stable targets. Default output is compact:
 
 ```text
-turn:1
-  user aaa00001: "old irrelevant turn"
-  assistant aaa00002: text
+turn:1  user: "old irrelevant turn"  2 entries, 0 output chars
+
+Largest forgettable outputs:
+  output:fde92dfa  bashExecution, 12000 chars, "..."
 ```
+
+Use `detail:"entries"` with `turn:N` to expand one turn, or `detail:"outputs"` to list only output redaction targets.
 
 ### `forget`
 

@@ -6,6 +6,10 @@ import { Type } from "typebox";
 const MAX_LIST_LIMIT = 50;
 const DEFAULT_LIST_LIMIT = 12;
 const SNIPPET_CHARS = 180;
+const SUMMARY_SNIPPET_CHARS = 90;
+const DEFAULT_SUGGESTION_LIMIT = 8;
+
+type ListContextDetail = "summary" | "entries" | "outputs";
 
 interface ContextItem {
 	entryId: string;
@@ -237,11 +241,62 @@ function outputSurfaceText(item: ContextItem): string | undefined {
 	return undefined;
 }
 
-function formatProjectedContext(prelude: ContextItem[], turns: Turn[], scope: "recent" | "all", limit: number): string {
-	const selectedTurns = scope === "all" ? turns.slice(0, limit) : turns.slice(-limit);
+function selectTurns(turns: Turn[], scope: "recent" | "all", limit: number): Turn[] {
+	return scope === "all" ? turns.slice(0, limit) : turns.slice(-limit);
+}
+
+function formatSelectionFooter(totalTurns: number, selectedTurns: number, scope: "recent" | "all"): string | undefined {
+	if (totalTurns <= selectedTurns) return undefined;
+	return scope === "all"
+		? `Showing first ${selectedTurns} of ${totalTurns} visible turns. Use a higher limit for more.`
+		: `Showing last ${selectedTurns} of ${totalTurns} visible turns. Use scope:"all" or a higher limit for more.`;
+}
+
+function firstUserText(turn: Turn): string {
+	const firstUser = turn.items.find((item) => item.message.role === "user");
+	return firstUser ? contentText(messageRecord(firstUser.message).content) : "";
+}
+
+function countOutputChars(items: ContextItem[]): number {
+	return items.reduce((total, item) => total + (outputSurfaceText(item)?.length ?? 0), 0);
+}
+
+function formatTurnSummary(turn: Turn): string {
+	const outputChars = countOutputChars(turn.items);
+	const suffix = outputChars > 0 ? `, ${outputChars} output chars` : "";
+	return `turn:${turn.number}  user: "${compactText(firstUserText(turn), SUMMARY_SNIPPET_CHARS)}"  ${turn.items.length} entries${suffix}`;
+}
+
+function getOutputCandidates(items: ContextItem[]): Array<{ item: ContextItem; output: string }> {
+	return items
+		.map((item) => ({ item, output: outputSurfaceText(item) }))
+		.filter((candidate): candidate is { item: ContextItem; output: string } => candidate.output !== undefined && candidate.output.length > 0)
+		.sort((a, b) => b.output.length - a.output.length);
+}
+
+function formatOutputCandidate(candidate: { item: ContextItem; output: string }): string {
+	const msg = messageRecord(candidate.item.message);
+	const kind = msg.role === "toolResult" ? `tool ${stringField(msg, "toolName") || "tool"}` : msg.role ?? "message";
+	return `output:${candidate.item.entryId}  ${kind}, ${candidate.output.length} chars, "${compactText(candidate.output, SUMMARY_SNIPPET_CHARS)}"`;
+}
+
+function formatProjectedContext(
+	prelude: ContextItem[],
+	turns: Turn[],
+	scope: "recent" | "all",
+	limit: number,
+	detail: ListContextDetail,
+	turnNumber?: number,
+): string {
+	const selectedTurns = turnNumber !== undefined ? turns.filter((turn) => turn.number === turnNumber) : selectTurns(turns, scope, limit);
 	const lines: string[] = ["Current provider-visible context:", ""];
 
-	if (prelude.length) {
+	if (turnNumber !== undefined && selectedTurns.length === 0) {
+		lines.push(`Unknown turn:${turnNumber}.`);
+		return lines.join("\n");
+	}
+
+	if (prelude.length && detail === "entries") {
 		for (const item of prelude) lines.push(summarizeItem(item));
 		lines.push("");
 	}
@@ -251,26 +306,38 @@ function formatProjectedContext(prelude: ContextItem[], turns: Turn[], scope: "r
 		return lines.join("\n");
 	}
 
-	for (const turn of selectedTurns) {
-		lines.push(`turn:${turn.number}`);
-		for (const item of turn.items) lines.push(`  ${summarizeItem(item)}`);
-		lines.push("");
+	if (detail === "summary") {
+		for (const turn of selectedTurns) lines.push(formatTurnSummary(turn));
+		const candidates = getOutputCandidates(selectedTurns.flatMap((turn) => turn.items)).slice(0, DEFAULT_SUGGESTION_LIMIT);
+		if (candidates.length) {
+			lines.push("", "Largest forgettable outputs:");
+			for (const candidate of candidates) lines.push(`  ${formatOutputCandidate(candidate)}`);
+		}
+	} else if (detail === "outputs") {
+		const candidates = getOutputCandidates(selectedTurns.flatMap((turn) => turn.items));
+		if (!candidates.length) {
+			lines.push("No forgettable outputs in selected turns.");
+		} else {
+			for (const candidate of candidates) lines.push(formatOutputCandidate(candidate));
+		}
+	} else {
+		for (const turn of selectedTurns) {
+			lines.push(`turn:${turn.number}`);
+			for (const item of turn.items) lines.push(`  ${summarizeItem(item)}`);
+			lines.push("");
+		}
 	}
 
-	if (turns.length > selectedTurns.length) {
-		lines.push(
-			scope === "all"
-				? `Showing first ${selectedTurns.length} of ${turns.length} visible turns. Use a higher limit for more.`
-				: `Showing last ${selectedTurns.length} of ${turns.length} visible turns. Use scope:"all" or a higher limit for more.`,
-		);
-	}
+	const footer = turnNumber === undefined ? formatSelectionFooter(turns.length, selectedTurns.length, scope) : undefined;
+	if (footer) lines.push("", footer);
+	if (detail === "summary") lines.push("", `Use detail:"entries" with turn:N to expand a turn, or detail:"outputs" to list only output targets.`);
 	return lines.join("\n").trimEnd();
 }
 
-function formatContextIndex(ctx: ExtensionContext, scope: "recent" | "all", limit: number): string {
+function formatContextIndex(ctx: ExtensionContext, scope: "recent" | "all", limit: number, detail: ListContextDetail, turn?: number): string {
 	const items = getCoreProjection(ctx).items.map(itemFromCore);
 	const { prelude, turns } = groupTurns(items);
-	return formatProjectedContext(prelude, turns, scope, limit);
+	return formatProjectedContext(prelude, turns, scope, limit, detail, turn);
 }
 
 function makeRewriteId(existingCount: number): string {
@@ -394,11 +461,17 @@ export default function piForget(pi: ExtensionAPI) {
 		parameters: Type.Object({
 			scope: Type.Optional(Type.Union([Type.Literal("recent"), Type.Literal("all")], { default: "recent" })),
 			limit: Type.Optional(Type.Number({ minimum: 1, maximum: MAX_LIST_LIMIT, default: DEFAULT_LIST_LIMIT })),
+			detail: Type.Optional(
+				Type.Union([Type.Literal("summary"), Type.Literal("entries"), Type.Literal("outputs")], { default: "summary" }),
+			),
+			turn: Type.Optional(Type.Number({ minimum: 1, description: "Specific turn number to inspect." })),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const scope = params.scope ?? "recent";
+			const detail = params.detail ?? "summary";
 			const limit = Math.min(MAX_LIST_LIMIT, Math.max(1, Math.floor(params.limit ?? DEFAULT_LIST_LIMIT)));
-			return { content: [{ type: "text", text: formatContextIndex(ctx, scope, limit) }], details: {} };
+			const turn = params.turn === undefined ? undefined : Math.max(1, Math.floor(params.turn));
+			return { content: [{ type: "text", text: formatContextIndex(ctx, scope, limit, detail, turn) }], details: {} };
 		},
 	});
 
@@ -470,7 +543,9 @@ export const __test = {
 	contentText,
 	createForgetDirective,
 	formatContextIndex,
+	formatOutputCandidate,
 	formatProjectedContext,
+	formatTurnSummary,
 	groupTurns,
 	hashContextText,
 	parseEntryTarget,

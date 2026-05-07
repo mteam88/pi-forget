@@ -86,6 +86,29 @@ function makePi(): any {
 }
 
 {
+	const ctx = makeCtx([
+		{ entryId: "u1", sourceEntryIds: ["u1"], message: user("old") },
+		{ entryId: "a1", sourceEntryIds: ["a1"], message: assistant("old answer") },
+		{ entryId: "bash12345", sourceEntryIds: ["bash12345"], message: bash("printf secret", "SECRET OUTPUT") },
+		{ entryId: "u2", sourceEntryIds: ["u2"], message: user("current") },
+	]);
+
+	const summary = __test.formatContextIndex(ctx, "recent", 12, "summary");
+	assert.match(summary, /turn:1  user: "old"  3 entries, 13 output chars/);
+	assert.match(summary, /Largest forgettable outputs:/);
+	assert.match(summary, /output:bash12345/);
+	assert.doesNotMatch(summary, /assistant a1:/);
+
+	const entries = __test.formatContextIndex(ctx, "recent", 12, "entries", 1);
+	assert.match(entries, /assistant a1: text/);
+	assert.match(entries, /bashExecution bash12345:/);
+
+	const outputs = __test.formatContextIndex(ctx, "recent", 12, "outputs", 1);
+	assert.match(outputs, /output:bash12345/);
+	assert.doesNotMatch(outputs, /turn:1  user/);
+}
+
+{
 	const pi = makePi();
 	const ctx = makeCtx([
 		{ entryId: "u1", sourceEntryIds: ["u1"], message: user("old") },
