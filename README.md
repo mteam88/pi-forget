@@ -31,7 +31,7 @@ Largest forgettable outputs:
   output:fde92dfa  bashExecution, 12000 chars, "..."
 ```
 
-Use `detail:"entries"` with `turn:N` to expand one turn, or `detail:"outputs"` to list only output redaction targets.
+Use `detail:"entries"` with `turn:N` to expand one turn, or `detail:"outputs"` to search output redaction targets. Output search supports `minChars`, `maxOutputs`, `query`, and `excludeLatestTurns`, and prints a ready-to-run `forget({ targets: [...] })` snippet.
 
 ### `forget`
 

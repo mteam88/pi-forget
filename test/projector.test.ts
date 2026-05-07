@@ -105,7 +105,12 @@ function makePi(): any {
 
 	const outputs = __test.formatContextIndex(ctx, "recent", 12, "outputs", 1);
 	assert.match(outputs, /output:bash12345/);
+	assert.match(outputs, /Apply with:/);
+	assert.match(outputs, /forget\(\{ targets: \["output:bash12345"\]/);
 	assert.doesNotMatch(outputs, /turn:1  user/);
+
+	const filtered = __test.formatContextIndex(ctx, "recent", 12, "outputs", undefined, { minChars: 20 });
+	assert.match(filtered, /No forgettable outputs/);
 }
 
 {
