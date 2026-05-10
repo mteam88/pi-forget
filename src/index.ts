@@ -644,6 +644,22 @@ function applyForget(ctx: ExtensionContext, targets: string[], reason?: string, 
 	return applyForgetPlan(ctx, plan);
 }
 
+function labelSyntheticBranch(pi: ExtensionAPI, ctx: ExtensionContext, result: ApplyForgetResult): void {
+	const rewrittenLeafId = typeof result.details.rewrittenLeafId === "string" ? result.details.rewrittenLeafId : undefined;
+	const rewrittenContentLeafId = typeof result.details.rewrittenContentLeafId === "string" ? result.details.rewrittenContentLeafId : undefined;
+	const forgetId = typeof result.details.forgetId === "string" ? result.details.forgetId : undefined;
+	if (!rewrittenLeafId || !forgetId) return;
+
+	const label = `pi-forget ${forgetId}`;
+	if (rewrittenContentLeafId && ctx.sessionManager.getEntry(rewrittenContentLeafId)) {
+		pi.setLabel(rewrittenContentLeafId, label);
+	}
+	if (ctx.sessionManager.getEntry(rewrittenLeafId)) {
+		pi.setLabel(rewrittenLeafId, label);
+	}
+	sessionManager(ctx).branch(rewrittenLeafId);
+}
+
 function getPiForgetMetadata(branch: SessionEntry[]): Array<{ entry: SessionEntry; data: Record<string, unknown> }> {
 	return branch
 		.filter((entry): entry is Extract<SessionEntry, { type: "custom" }> => entry.type === "custom" && entry.customType === CUSTOM_TYPE && !!entry.data && typeof entry.data === "object")
@@ -763,6 +779,7 @@ export default function piForget(pi: ExtensionAPI) {
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const result = applyForget(ctx, params.targets, params.reason, params.replacement);
 			if (typeof result.details.rewrittenLeafId === "string") {
+				labelSyntheticBranch(pi, ctx, result);
 				pendingSyntheticContextRefresh = true;
 			}
 			return { content: [{ type: "text", text: result.text }], details: result.details };
@@ -780,7 +797,10 @@ export default function piForget(pi: ExtensionAPI) {
 			}
 			const result = applyForget(ctx, [target], reasonParts.join(" ") || undefined);
 			const rewrittenLeafId = result.details.rewrittenLeafId;
-			if (typeof rewrittenLeafId === "string") await refreshSessionContextAtLeaf(ctx, rewrittenLeafId);
+			if (typeof rewrittenLeafId === "string") {
+				labelSyntheticBranch(pi, ctx, result);
+				await refreshSessionContextAtLeaf(ctx, rewrittenLeafId);
+			}
 			ctx.ui.notify(result.text, "info");
 		},
 	});
