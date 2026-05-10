@@ -2,7 +2,7 @@
   "name": "pi-forget",
   "version": "0.1.0",
   "type": "module",
-  "description": "A pi extension for reversible, branch-local context forgetting.",
+  "description": "A pi extension for reversible synthetic-branch context forgetting.",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/mteam88/pi-forget.git"

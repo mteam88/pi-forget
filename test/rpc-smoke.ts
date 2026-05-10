@@ -88,30 +88,30 @@ const stateId = send({ type: "get_state" });
 const state = await waitForResponse(stateId);
 assert.equal(state.success, true);
 
-const forgetId = send({ type: "prompt", message: "/forget turn:1 obsolete" });
-const forgetResponse = await waitForResponse(forgetId);
+const forgetRequestId = send({ type: "prompt", message: "/forget turn:1 obsolete" });
+const forgetResponse = await waitForResponse(forgetRequestId);
 assert.equal(forgetResponse.success, true);
 
 await new Promise((resolvePromise) => setTimeout(resolvePromise, 500));
 let content = readFileSync(sessionFile, "utf8");
-assert.match(content, /"type":"context_rewrite"/);
-assert.match(content, /"target":\{"kind":"range","fromEntryId":"aaa00001","toEntryId":"aaa00002"\}/);
-assert.match(content, /"after":"\[context forgotten by pi-forget: turn:1\]"/);
-assert.doesNotMatch(content, /"customType":"pi-forget"/);
-const rewriteId = content.match(/"rewriteId":"([^"]+)"/)?.[1];
-assert(rewriteId, "rewrite id persisted");
+assert.doesNotMatch(content, /"type":"context_rewrite"/);
+assert.match(content, /"type":"custom_message"/);
+assert.match(content, /"customType":"pi-forget"/);
+assert.match(content, /"content":"\[context forgotten by pi-forget: turn:1\]"/);
+assert.match(content, /"kind":"synthetic_branch"/);
+const forgetId = content.match(/"forgetId":"([^"]+)"/)?.[1];
+assert(forgetId, "forget id persisted");
 
 const forgottenId = send({ type: "prompt", message: "/forgotten" });
 const forgottenResponse = await waitForResponse(forgottenId);
 assert.equal(forgottenResponse.success, true);
 
-const unforgetId = send({ type: "prompt", message: `/unforget ${rewriteId}` });
-const unforgetResponse = await waitForResponse(unforgetId);
+const unforgetRequestId = send({ type: "prompt", message: `/unforget ${forgetId}` });
+const unforgetResponse = await waitForResponse(unforgetRequestId);
 assert.equal(unforgetResponse.success, true);
 await new Promise((resolvePromise) => setTimeout(resolvePromise, 500));
 content = readFileSync(sessionFile, "utf8");
-assert.match(content, /"type":"context_rewrite_undo"/);
-assert.match(content, new RegExp(`"rewriteId":"${rewriteId}"`));
+assert.doesNotMatch(content, /"type":"context_rewrite_undo"/);
 
 child.kill("SIGTERM");
 console.log(`rpc smoke passed (${sessionFile})`);

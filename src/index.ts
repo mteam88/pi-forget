@@ -1,6 +1,11 @@
-import { createHash } from "node:crypto";
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type {
+	ExtensionAPI,
+	ExtensionCommandContext,
+	ExtensionContext,
+	SessionEntry,
+	SessionManager,
+} from "@mariozechner/pi-coding-agent";
 import { Type } from "typebox";
 
 const MAX_LIST_LIMIT = 50;
@@ -10,57 +15,21 @@ const SUMMARY_SNIPPET_CHARS = 90;
 const DEFAULT_SUGGESTION_LIMIT = 8;
 const DEFAULT_OUTPUT_LIMIT = 20;
 const MAX_OUTPUT_LIMIT = 100;
+const CUSTOM_TYPE = "pi-forget";
 
 type ListContextDetail = "summary" | "entries" | "outputs";
+type RewriteKind = "turn" | "entry" | "output";
 
 interface ContextItem {
 	entryId: string;
 	message: AgentMessage;
 	sourceEntryIds: string[];
-	rewriteId?: string;
 }
 
-interface CoreContextRewriteInput {
-	rewriteId?: string;
-	target:
-		| { kind: "range"; fromEntryId: string; toEntryId: string }
-		| { kind: "surface"; entryId: string; surface: "text" | "output" | "summary" | "rendered" }
-		| { kind: "insert"; afterEntryId: string | null };
-	before?: string;
-	beforeHash?: string;
-	after: string;
-	reason?: string;
-	details?: unknown;
-	fromHook?: boolean;
+interface ProjectedContext {
+	branch: SessionEntry[];
+	items: ContextItem[];
 }
-
-interface CoreContextRewriteEntry extends CoreContextRewriteInput {
-	type: "context_rewrite";
-	id: string;
-	parentId: string | null;
-	timestamp: string;
-}
-
-interface CoreProjectionItem {
-	entryId: string;
-	sourceEntryIds: string[];
-	rewriteId?: string;
-	message: AgentMessage;
-}
-
-interface CoreSessionProjection {
-	items: CoreProjectionItem[];
-	activeRewrites: CoreContextRewriteEntry[];
-}
-
-type CoreExtensionAPI = ExtensionAPI & {
-	appendContextRewrite: (rewrite: CoreContextRewriteInput) => string;
-	undoContextRewrite: (rewriteId: string) => string;
-};
-
-type CoreSessionManager = ExtensionContext["sessionManager"] & {
-	buildSessionProjection?: () => CoreSessionProjection;
-};
 
 interface Turn {
 	number: number;
@@ -69,39 +38,107 @@ interface Turn {
 	items: ContextItem[];
 }
 
+interface RewritePlan {
+	id: string;
+	targets: string[];
+	reason?: string;
+	replacement?: string;
+	originalLeafId: string | null;
+	firstChangedIndex: number;
+	insertBefore: Map<string, string[]>;
+	dropEntryIds: Set<string>;
+	replaceEntry: Map<string, string>;
+	redactOutput: Map<string, string>;
+}
+
+interface ApplyForgetResult {
+	text: string;
+	details: Record<string, unknown>;
+}
+
 type MessageRecord = Record<string, unknown> & { role?: string };
 type ContentBlock = Record<string, unknown> & { type?: string };
+type MutableSessionManager = SessionManager;
+
 
 function messageRecord(message: AgentMessage): MessageRecord {
 	return message as unknown as MessageRecord;
 }
 
-function hashContextText(text: string): string {
-	return `sha256:${createHash("sha256").update(text).digest("hex")}`;
+function sessionManager(ctx: ExtensionContext): MutableSessionManager {
+	return ctx.sessionManager as unknown as MutableSessionManager;
 }
 
-function getCoreProjection(ctx: ExtensionContext): CoreSessionProjection {
-	const buildSessionProjection = (ctx.sessionManager as CoreSessionManager).buildSessionProjection;
-	if (!buildSessionProjection) {
-		throw new Error("pi-forget requires a pi build with core context rewrites (buildSessionProjection). Run the rebased pi from source or install that build.");
+function projectEntry(entry: SessionEntry): ContextItem | undefined {
+	if (entry.type === "message") {
+		return { entryId: entry.id, sourceEntryIds: [entry.id], message: entry.message };
 	}
-	return buildSessionProjection.call(ctx.sessionManager as CoreSessionManager);
-}
-
-function getCorePi(pi: ExtensionAPI): CoreExtensionAPI {
-	const candidate = pi as Partial<CoreExtensionAPI>;
-	if (!candidate.appendContextRewrite || !candidate.undoContextRewrite) {
-		throw new Error("pi-forget requires a pi build with pi.appendContextRewrite() and pi.undoContextRewrite().");
+	if (entry.type === "custom_message") {
+		return {
+			entryId: entry.id,
+			sourceEntryIds: [entry.id],
+			message: {
+				role: "custom",
+				customType: entry.customType,
+				content: entry.content,
+				display: entry.display,
+				details: entry.details,
+				timestamp: new Date(entry.timestamp).getTime(),
+			} as AgentMessage,
+		};
 	}
-	return pi as CoreExtensionAPI;
+	if (entry.type === "branch_summary" && entry.summary) {
+		return {
+			entryId: entry.id,
+			sourceEntryIds: [entry.id],
+			message: {
+				role: "branchSummary",
+				summary: entry.summary,
+				fromId: entry.fromId,
+				timestamp: new Date(entry.timestamp).getTime(),
+			} as AgentMessage,
+		};
+	}
+	if (entry.type === "compaction") {
+		return {
+			entryId: entry.id,
+			sourceEntryIds: [entry.id],
+			message: {
+				role: "compactionSummary",
+				summary: entry.summary,
+				tokensBefore: entry.tokensBefore,
+				timestamp: new Date(entry.timestamp).getTime(),
+			} as AgentMessage,
+		};
+	}
+	return undefined;
 }
 
-function itemFromCore(item: CoreProjectionItem): ContextItem {
+function projectContext(ctx: ExtensionContext): ProjectedContext {
+	const branch = ctx.sessionManager.getBranch();
+	let compaction: SessionEntry | undefined;
+	for (const entry of branch) {
+		if (entry.type === "compaction") compaction = entry;
+	}
+
+	const projectedEntries: SessionEntry[] = [];
+	if (compaction?.type === "compaction") {
+		projectedEntries.push(compaction);
+		const compactionIndex = branch.findIndex((entry) => entry.id === compaction.id);
+		let foundFirstKept = false;
+		for (let i = 0; i < compactionIndex; i++) {
+			const entry = branch[i];
+			if (entry.id === compaction.firstKeptEntryId) foundFirstKept = true;
+			if (foundFirstKept) projectedEntries.push(entry);
+		}
+		for (let i = compactionIndex + 1; i < branch.length; i++) projectedEntries.push(branch[i]);
+	} else {
+		projectedEntries.push(...branch);
+	}
+
 	return {
-		entryId: item.entryId,
-		message: item.message,
-		sourceEntryIds: item.sourceEntryIds,
-		rewriteId: item.rewriteId,
+		branch,
+		items: projectedEntries.map(projectEntry).filter((item): item is ContextItem => item !== undefined),
 	};
 }
 
@@ -170,6 +207,12 @@ function contentText(content: unknown, separator = " "): string {
 		.join(separator);
 }
 
+function replaceTextBlocks(content: unknown, text: string): string | Array<Record<string, unknown>> {
+	if (typeof content === "string") return text;
+	const images = asContentBlocks(content).filter((block) => block.type === "image");
+	return [{ type: "text", text }, ...images];
+}
+
 function stringField(record: MessageRecord, key: string): string {
 	const value = record[key];
 	return typeof value === "string" ? value : "";
@@ -208,8 +251,6 @@ function summarizeItem(item: ContextItem): string {
 			const output = stringField(msg, "output");
 			return `bashExecution ${item.entryId}: ${command ? `\`${compactText(command, 80)}\`, ` : ""}${output.length} chars${output ? `, "${compactText(output, 90)}"` : ""}`;
 		}
-		case "contextRewrite":
-			return `context-rewrite ${item.rewriteId ?? item.entryId}: "${compactText(stringField(msg, "text"), 120)}"`;
 		default:
 			return `${msg.role ?? "message"} ${item.entryId}`;
 	}
@@ -229,8 +270,6 @@ function renderedItemText(item: ContextItem): string {
 		case "branchSummary":
 		case "compactionSummary":
 			return stringField(msg, "summary");
-		case "contextRewrite":
-			return stringField(msg, "text");
 		default:
 			return "";
 	}
@@ -377,7 +416,7 @@ function formatContextIndex(
 	outputOptions?: OutputSearchOptions,
 	excludeLatestTurns?: number,
 ): string {
-	const items = getCoreProjection(ctx).items.map(itemFromCore);
+	const { items } = projectContext(ctx);
 	const { prelude, turns } = groupTurns(items);
 	return formatProjectedContext(prelude, turns, scope, limit, detail, turn, outputOptions, excludeLatestTurns);
 }
@@ -387,14 +426,10 @@ function makeRewriteId(existingCount: number): string {
 	return `forget-${String(existingCount + 1).padStart(3, "0")}-${rand}`;
 }
 
-function isPiForgetRewrite(rewrite: CoreContextRewriteEntry): boolean {
-	return !!rewrite.details && typeof rewrite.details === "object" && "piForget" in rewrite.details;
-}
-
-function replacementFor(kind: "context" | "entry" | "output", label: string, replacement?: string): string {
+function replacementFor(kind: RewriteKind, label: string, replacement?: string): string {
 	if (replacement !== undefined) return replacement;
 	switch (kind) {
-		case "context":
+		case "turn":
 			return `[context forgotten by pi-forget: ${label}]`;
 		case "entry":
 			return `[entry forgotten by pi-forget: ${label}]`;
@@ -403,112 +438,262 @@ function replacementFor(kind: "context" | "entry" | "output", label: string, rep
 	}
 }
 
-function createForgetDirective(
-	pi: ExtensionAPI,
-	ctx: ExtensionContext,
-	targets: string[],
-	reason?: string,
-	replacement?: string,
-): { text: string; details: Record<string, unknown> } {
-	const projection = getCoreProjection(ctx);
-	const corePi = getCorePi(pi);
-	const items = projection.items.map(itemFromCore);
+function branchIndexById(branch: SessionEntry[]): Map<string, number> {
+	const indexes = new Map<string, number>();
+	branch.forEach((entry, index) => indexes.set(entry.id, index));
+	return indexes;
+}
+
+function sourceEntryIds(item: ContextItem): string[] {
+	return item.sourceEntryIds.length ? item.sourceEntryIds : [item.entryId];
+}
+
+function existingPiForgetCount(branch: SessionEntry[]): number {
+	return branch.filter((entry) => entry.type === "custom" && entry.customType === CUSTOM_TYPE).length;
+}
+
+function buildForgetPlan(ctx: ExtensionContext, targets: string[], reason?: string, replacement?: string): { plan?: RewritePlan; error?: ApplyForgetResult } {
+	const projection = projectContext(ctx);
+	const { branch, items } = projection;
 	const { turns } = groupTurns(items);
 	const latestTurn = turns.at(-1)?.number;
-	const activePiForgetCount = projection.activeRewrites.filter(isPiForgetRewrite).length;
-	const baseRewriteId = makeRewriteId(activePiForgetCount);
-	const rewriteInputs: CoreContextRewriteInput[] = [];
-	const targetLabels: string[] = [];
-	const sharedReplacement = replacement !== undefined && targets.length > 1;
+	const indexById = branchIndexById(branch);
+	const plan: RewritePlan = {
+		id: makeRewriteId(existingPiForgetCount(branch)),
+		targets,
+		reason,
+		replacement,
+		originalLeafId: ctx.sessionManager.getLeafId(),
+		firstChangedIndex: Number.POSITIVE_INFINITY,
+		insertBefore: new Map(),
+		dropEntryIds: new Set(),
+		replaceEntry: new Map(),
+		redactOutput: new Map(),
+	};
+
+	const markChanged = (entryId: string) => {
+		const index = indexById.get(entryId);
+		if (index !== undefined) plan.firstChangedIndex = Math.min(plan.firstChangedIndex, index);
+	};
+
+	const addInsertBefore = (entryId: string, text: string) => {
+		const existing = plan.insertBefore.get(entryId) ?? [];
+		existing.push(text);
+		plan.insertBefore.set(entryId, existing);
+		markChanged(entryId);
+	};
 
 	for (const target of targets) {
 		const turnNumber = parseTurnTarget(target);
 		if (turnNumber !== undefined) {
 			const turn = turns.find((candidate) => candidate.number === turnNumber);
-			if (!turn) return { text: `Unknown ${target}. Run list_context for current turn numbers.`, details: { error: "unknown_turn", target } };
+			if (!turn) return { error: { text: `Unknown ${target}. Run list_context for current turn numbers.`, details: { error: "unknown_turn", target } } };
 			if (turnNumber === latestTurn) {
-				return { text: `Refusing to forget ${target}: pi-forget does not forget the current/latest turn.`, details: { error: "latest_turn", target } };
+				return { error: { text: `Refusing to forget ${target}: pi-forget does not forget the current/latest turn.`, details: { error: "latest_turn", target } } };
 			}
-			const first = turn.items[0]?.sourceEntryIds[0] ?? turn.items[0]?.entryId;
-			const lastItem = turn.items.at(-1);
-			const last = lastItem?.sourceEntryIds.at(-1) ?? lastItem?.entryId;
-			if (!first || !last) return { text: `Could not resolve ${target} to source entries.`, details: { error: "unresolved_turn", target } };
-			const before = turn.items.map(renderedItemText).join("\n");
-			const after = replacementFor("context", target, replacement);
-			rewriteInputs.push({
-				rewriteId: rewriteInputs.length === 0 ? baseRewriteId : `${baseRewriteId}-${rewriteInputs.length + 1}`,
-				target: { kind: "range", fromEntryId: first, toEntryId: last },
-				beforeHash: hashContextText(before),
-				after,
-				reason,
-				details: { piForget: { targets, reason, replacement: replacement ?? undefined } },
-			});
-			targetLabels.push(target);
+			const ids = turn.items.flatMap(sourceEntryIds);
+			const first = ids[0];
+			if (!first) return { error: { text: `Could not resolve ${target} to source entries.`, details: { error: "unresolved_turn", target } } };
+			addInsertBefore(first, replacementFor("turn", target, replacement));
+			for (const id of ids) {
+				plan.dropEntryIds.add(id);
+				markChanged(id);
+			}
 			continue;
 		}
 
 		const outputEntryId = parseOutputTarget(target);
 		if (outputEntryId !== undefined) {
-			const matches = items.filter((candidate) => candidate.entryId === outputEntryId || candidate.sourceEntryIds.includes(outputEntryId));
-			if (!matches.length) return { text: `Unknown output entry ${outputEntryId}. Run list_context for current visible entries.`, details: { error: "unknown_output", target } };
-			const item = matches.find((candidate) => outputSurfaceText(candidate) !== undefined);
-			if (!item) return { text: `Entry ${outputEntryId} has no separable output to forget.`, details: { error: "not_redactable", target } };
-			const output = outputSurfaceText(item) ?? "";
-			const rewriteEntryId = item.entryId === outputEntryId ? outputEntryId : (item.sourceEntryIds.find((id) => id === outputEntryId) ?? item.entryId);
-			const after = replacementFor("output", outputEntryId, replacement);
-			rewriteInputs.push({
-				rewriteId: rewriteInputs.length === 0 ? baseRewriteId : `${baseRewriteId}-${rewriteInputs.length + 1}`,
-				target: { kind: "surface", entryId: rewriteEntryId, surface: "output" },
-				beforeHash: hashContextText(output),
-				after,
-				reason,
-				details: { piForget: { targets, reason, replacement: replacement ?? undefined } },
-			});
-			targetLabels.push(target);
+			const item = items.find((candidate) => (candidate.entryId === outputEntryId || candidate.sourceEntryIds.includes(outputEntryId)) && outputSurfaceText(candidate) !== undefined);
+			if (!item) return { error: { text: `Unknown output entry ${outputEntryId}, or entry has no separable output.`, details: { error: "unknown_output", target } } };
+			const rewriteEntryId = sourceEntryIds(item).find((id) => id === outputEntryId) ?? item.entryId;
+			plan.redactOutput.set(rewriteEntryId, replacementFor("output", outputEntryId, replacement));
+			markChanged(rewriteEntryId);
 			continue;
 		}
 
 		const entryId = parseEntryTarget(target);
 		if (entryId !== undefined) {
 			const item = items.find((candidate) => candidate.entryId === entryId || candidate.sourceEntryIds.includes(entryId));
-			if (!item) return { text: `Unknown entry ${entryId}. Run list_context for current visible entries.`, details: { error: "unknown_entry", target } };
-			const before = renderedItemText(item);
-			const after = replacementFor("entry", entryId, replacement);
-			rewriteInputs.push({
-				rewriteId: rewriteInputs.length === 0 ? baseRewriteId : `${baseRewriteId}-${rewriteInputs.length + 1}`,
-				target: { kind: "surface", entryId, surface: "rendered" },
-				beforeHash: hashContextText(before),
-				after,
-				reason,
-				details: { piForget: { targets, reason, replacement: replacement ?? undefined } },
-			});
-			targetLabels.push(target);
+			if (!item) return { error: { text: `Unknown entry ${entryId}. Run list_context for current visible entries.`, details: { error: "unknown_entry", target } } };
+			const rewriteEntryId = sourceEntryIds(item).find((id) => id === entryId) ?? item.entryId;
+			plan.replaceEntry.set(rewriteEntryId, replacementFor("entry", entryId, replacement));
+			markChanged(rewriteEntryId);
 			continue;
 		}
 
-		return { text: `Invalid target ${target}. Use turn:N, entry:<id>, or output:<id> from list_context.`, details: { error: "invalid_target", target } };
+		return { error: { text: `Invalid target ${target}. Use turn:N, entry:<id>, or output:<id> from list_context.`, details: { error: "invalid_target", target } } };
 	}
 
-	const entryIds = rewriteInputs.map((rewrite) => corePi.appendContextRewrite(rewrite));
+	if (!Number.isFinite(plan.firstChangedIndex)) {
+		return { error: { text: "No changes to apply.", details: { error: "empty_plan" } } };
+	}
+	return { plan };
+}
+
+function cloneMessageWithRedactedOutput(message: AgentMessage, replacement: string): AgentMessage {
+	const cloned = structuredClone(message) as AgentMessage;
+	const record = cloned as unknown as MessageRecord;
+	if (record.role === "bashExecution") {
+		record.output = replacement;
+		record.truncated = false;
+		delete record.fullOutputPath;
+	} else if (record.role === "toolResult") {
+		record.content = replaceTextBlocks(record.content, replacement);
+	}
+	return cloned;
+}
+
+function appendBranchSummary(sm: MutableSessionManager, original: Extract<SessionEntry, { type: "branch_summary" }>): string {
+	return sm.appendCustomMessageEntry(CUSTOM_TYPE, original.summary, false, {
+		kind: "cloned_branch_summary",
+		fromId: original.fromId,
+		details: structuredClone(original.details),
+		fromHook: original.fromHook,
+	});
+}
+
+function appendClonedEntry(sm: MutableSessionManager, original: SessionEntry, replacementOutput?: string): string | null {
+	switch (original.type) {
+		case "message":
+			return sm.appendMessage(
+				(replacementOutput === undefined ? structuredClone(original.message) : cloneMessageWithRedactedOutput(original.message, replacementOutput)) as Parameters<
+					SessionManager["appendMessage"]
+				>[0],
+			);
+		case "custom_message":
+			return sm.appendCustomMessageEntry(original.customType, structuredClone(original.content), original.display, structuredClone(original.details));
+		case "model_change":
+			return sm.appendModelChange(original.provider, original.modelId);
+		case "thinking_level_change":
+			return sm.appendThinkingLevelChange(original.thinkingLevel);
+		case "compaction":
+			return sm.appendCompaction(original.summary, original.firstKeptEntryId, original.tokensBefore, structuredClone(original.details), original.fromHook);
+		case "custom":
+			return sm.appendCustomEntry(original.customType, structuredClone(original.data));
+		case "session_info":
+			return sm.appendSessionInfo(original.name ?? "");
+		case "branch_summary":
+			return appendBranchSummary(sm, original);
+		case "label":
+			return null;
+	}
+}
+
+function appendReplacement(sm: MutableSessionManager, text: string, plan: RewritePlan, sourceEntryId: string): string {
+	return sm.appendCustomMessageEntry(CUSTOM_TYPE, text, true, {
+		kind: "replacement",
+		forgetId: plan.id,
+		sourceEntryId,
+		targets: plan.targets,
+		reason: plan.reason,
+	});
+}
+
+function appendMetadata(sm: MutableSessionManager, plan: RewritePlan, rewrittenFromId: string | null): string {
+	return sm.appendCustomEntry(CUSTOM_TYPE, {
+		kind: "synthetic_branch",
+		forgetId: plan.id,
+		targets: plan.targets,
+		reason: plan.reason,
+		replacement: plan.replacement,
+		originalLeafId: plan.originalLeafId,
+		rewrittenFromId,
+		createdAt: Date.now(),
+	});
+}
+
+function applyForgetPlan(ctx: ExtensionContext, plan: RewritePlan): ApplyForgetResult {
+	const sm = sessionManager(ctx);
+	const branch = ctx.sessionManager.getBranch();
+	const parentId = branch[plan.firstChangedIndex]?.parentId ?? null;
+	if (parentId) sm.branch(parentId);
+	else sm.resetLeaf();
+
+	let appended = 0;
+	for (let i = plan.firstChangedIndex; i < branch.length; i++) {
+		const entry = branch[i];
+		const replacements = plan.insertBefore.get(entry.id) ?? [];
+		for (const text of replacements) {
+			appendReplacement(sm, text, plan, entry.id);
+			appended++;
+		}
+		if (plan.dropEntryIds.has(entry.id)) continue;
+		const entryReplacement = plan.replaceEntry.get(entry.id);
+		if (entryReplacement !== undefined) {
+			appendReplacement(sm, entryReplacement, plan, entry.id);
+			appended++;
+			continue;
+		}
+		const cloned = appendClonedEntry(sm, entry, plan.redactOutput.get(entry.id));
+		if (cloned) appended++;
+	}
+	const rewrittenContentLeafId = sm.getLeafId();
+	const syntheticLeafId = appendMetadata(sm, plan, rewrittenContentLeafId);
+
 	return {
-		text: `Applied context rewrite${entryIds.length === 1 ? "" : "s"} ${rewriteInputs.map((rewrite) => rewrite.rewriteId).join(", ")} for ${targetLabels.join(", ")}${replacement !== undefined ? ` using ${sharedReplacement ? "the same replacement" : "custom replacement text"}` : ""}. Original session history is unchanged. Use /unforget <rewrite-id> to restore.`,
-		details: { rewriteIds: rewriteInputs.map((rewrite) => rewrite.rewriteId), entryIds, targets: targetLabels, replacementApplied: replacement !== undefined },
+		text: `Created synthetic pi-forget branch ${plan.id} for ${plan.targets.join(", ")}. Original session history is unchanged. Use /unforget ${plan.id} to return to the original branch.`,
+		details: { forgetId: plan.id, targets: plan.targets, originalLeafId: plan.originalLeafId, rewrittenLeafId: syntheticLeafId, rewrittenContentLeafId, appended },
 	};
 }
 
-function formatCoreRewrite(rewrite: CoreContextRewriteEntry): string {
+function applyForget(ctx: ExtensionContext, targets: string[], reason?: string, replacement?: string): ApplyForgetResult {
+	const { plan, error } = buildForgetPlan(ctx, targets, reason, replacement);
+	if (error) return error;
+	if (!plan) return { text: "No changes to apply.", details: { error: "empty_plan" } };
+	return applyForgetPlan(ctx, plan);
+}
+
+function getPiForgetMetadata(branch: SessionEntry[]): Array<{ entry: SessionEntry; data: Record<string, unknown> }> {
+	return branch
+		.filter((entry): entry is Extract<SessionEntry, { type: "custom" }> => entry.type === "custom" && entry.customType === CUSTOM_TYPE && !!entry.data && typeof entry.data === "object")
+		.map((entry) => ({ entry, data: entry.data as Record<string, unknown> }))
+		.filter(({ data }) => data.kind === "synthetic_branch" && typeof data.forgetId === "string");
+}
+
+function formatForgetMetadata(meta: { entry: SessionEntry; data: Record<string, unknown> }): string {
+	const targets = Array.isArray(meta.data.targets) ? meta.data.targets.filter((target): target is string => typeof target === "string").join(", ") : "";
+	const originalLeafId = typeof meta.data.originalLeafId === "string" ? meta.data.originalLeafId : "none";
 	return [
-		rewrite.rewriteId ?? rewrite.id,
-		`  target: ${JSON.stringify(rewrite.target)}`,
-		`  replacement: "${compactText(rewrite.after, 120)}"`,
-		rewrite.reason ? `  reason: ${rewrite.reason}` : undefined,
+		String(meta.data.forgetId),
+		`  targets: ${targets}`,
+		`  originalLeafId: ${originalLeafId}`,
+		typeof meta.data.reason === "string" ? `  reason: ${meta.data.reason}` : undefined,
 	]
-		.filter(Boolean)
+		.filter((line): line is string => line !== undefined)
 		.join("\n");
 }
 
+async function refreshSessionContextAtLeaf(ctx: ExtensionCommandContext, leafId: string): Promise<void> {
+	const sm = sessionManager(ctx);
+	const leaf = sm.getEntry(leafId);
+	if (!leaf) throw new Error(`Unknown synthetic leaf ${leafId}`);
+	if (leaf.parentId) sm.branch(leaf.parentId);
+	else sm.resetLeaf();
+	const result = await ctx.navigateTree(leafId, { summarize: false });
+	if (result.cancelled) throw new Error("Synthetic branch navigation was cancelled");
+}
+
+async function unforget(ctx: ExtensionCommandContext, forgetId: string): Promise<string> {
+	const meta = getPiForgetMetadata(ctx.sessionManager.getBranch()).find(({ data }) => data.forgetId === forgetId);
+	if (!meta) return `No active pi-forget synthetic branch found for ${forgetId}.`;
+	const originalLeafId = meta.data.originalLeafId;
+	if (typeof originalLeafId !== "string" || !ctx.sessionManager.getEntry(originalLeafId)) {
+		return `Cannot unforget ${forgetId}: original branch leaf is unavailable.`;
+	}
+	const result = await ctx.navigateTree(originalLeafId, { summarize: false });
+	if (result.cancelled) return `Unforget ${forgetId} cancelled.`;
+	return `Returned to original branch for ${forgetId}.`;
+}
+
 export default function piForget(pi: ExtensionAPI) {
-	getCorePi(pi);
+	let pendingSyntheticContextRefresh = false;
+
+	pi.on("context", async (_event, ctx) => {
+		if (!pendingSyntheticContextRefresh) return;
+		pendingSyntheticContextRefresh = false;
+		return { messages: projectContext(ctx).items.map((item) => item.message) };
+	});
 
 	pi.registerTool({
 		name: "list_context",
@@ -554,14 +739,14 @@ export default function piForget(pi: ExtensionAPI) {
 		name: "forget",
 		label: "Forget",
 		description:
-			"Omit stale provider-visible turns/specific entries, or redact bulky tool output while preserving the tool call, from future provider requests. This is for context-budget cleanup, not security: it does not delete session history, scrub logs, or safely handle leaked secrets/tokens.",
-		promptSnippet: "Forget stale context by turn:N, entry:<id>, or output:<id> from list_context",
+			"Create a synthetic session branch that omits stale provider-visible turns/specific entries, or redacts bulky tool output while preserving the original history on the old branch. This is for context-budget cleanup, not security: it does not delete session history, scrub logs, or safely handle leaked secrets/tokens.",
+		promptSnippet: "Forget stale context by creating a synthetic branch from turn:N, entry:<id>, or output:<id> targets from list_context",
 		promptGuidelines: [
 			"Use forget with turn:N, entry:<id>, or output:<id> targets returned by list_context.",
-			"Prefer output:<id> for bulky tool/read/bash/list_context output so useful surrounding conversation remains visible.",
-			"Prefer turn:N with replacement for completed stale work that can be collapsed into a concise summary.",
+			"Prefer output:<id> for bulky tool/read/bash/list_context output so useful surrounding conversation stays visible in the synthetic branch.",
+			"Prefer turn:N with replacement for completed stale work that can be collapsed into a summary.",
 			"Do not forget the current/latest turn; keep the active user request and current work visible.",
-			"Do not use forget as a security/privacy mechanism for sensitive tokens, credentials, or secrets. It only changes future provider-visible context; it does not erase the append-only session history or other copies.",
+			"Do not use forget as a security/privacy mechanism for sensitive tokens, credentials, or secrets. It only moves future work to a cleaned branch; it does not erase the append-only session history or other copies.",
 		],
 		parameters: Type.Object({
 			targets: Type.Array(Type.String({ description: "Targets to forget: turn:N, entry:<id>, or output:<id>." }), {
@@ -571,72 +756,73 @@ export default function piForget(pi: ExtensionAPI) {
 			replacement: Type.Optional(
 				Type.String({
 					description:
-						"Optional replacement/summary text to show in future context instead of the default pi-forget placeholder. For multiple targets, the same replacement is applied to each target.",
+						"Optional replacement/summary text to show in the synthetic branch instead of the default pi-forget placeholder. For multiple targets, the same replacement is applied to each target.",
 				}),
 			),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const result = createForgetDirective(pi, ctx, params.targets, params.reason, params.replacement);
+			const result = applyForget(ctx, params.targets, params.reason, params.replacement);
+			if (typeof result.details.rewrittenLeafId === "string") {
+				pendingSyntheticContextRefresh = true;
+			}
 			return { content: [{ type: "text", text: result.text }], details: result.details };
 		},
 	});
 
 	pi.registerCommand("forget", {
-		description: "Forget stale provider-visible turns, entries, or outputs for context cleanup only: /forget turn:N|entry:id|output:id [reason]",
+		description: "Create a synthetic branch forgetting stale provider-visible turns, entries, or outputs: /forget turn:N|entry:id|output:id [reason]",
 		handler: async (args, ctx) => {
+			await ctx.waitForIdle();
 			const [target, ...reasonParts] = args.trim().split(/\s+/).filter(Boolean);
 			if (!target) {
 				ctx.ui.notify("Usage: /forget turn:N|entry:id|output:id [reason]", "warning");
 				return;
 			}
-			const result = createForgetDirective(pi, ctx, [target], reasonParts.join(" ") || undefined);
+			const result = applyForget(ctx, [target], reasonParts.join(" ") || undefined);
+			const rewrittenLeafId = result.details.rewrittenLeafId;
+			if (typeof rewrittenLeafId === "string") await refreshSessionContextAtLeaf(ctx, rewrittenLeafId);
 			ctx.ui.notify(result.text, "info");
 		},
 	});
 
 	pi.registerCommand("forgotten", {
-		description: "Show active pi-forget context rewrites on the current branch",
+		description: "Show active pi-forget synthetic branch metadata",
 		handler: async (_args, ctx) => {
-			const rewrites = getCoreProjection(ctx).activeRewrites.filter(isPiForgetRewrite);
+			const active = getPiForgetMetadata(ctx.sessionManager.getBranch());
 			ctx.ui.notify(
-				rewrites.length ? `Active context rewrites:\n\n${rewrites.map(formatCoreRewrite).join("\n\n")}` : "No active pi-forget context rewrites on this branch.",
+				active.length ? `Active pi-forget synthetic branches:\n\n${active.map(formatForgetMetadata).join("\n\n")}` : "No active pi-forget synthetic branches on this branch.",
 				"info",
 			);
 		},
 	});
 
 	pi.registerCommand("unforget", {
-		description: "Restore context hidden by a pi-forget rewrite: /unforget <rewrite-id>",
+		description: "Return to the original branch for a pi-forget synthetic branch: /unforget <forget-id>",
 		handler: async (args, ctx) => {
-			const rewriteId = args.trim();
-			if (!rewriteId) {
-				ctx.ui.notify("Usage: /unforget <rewrite-id>", "warning");
+			await ctx.waitForIdle();
+			const forgetId = args.trim();
+			if (!forgetId) {
+				ctx.ui.notify("Usage: /unforget <forget-id>", "warning");
 				return;
 			}
-
-			const projection = getCoreProjection(ctx);
-			if (!projection.activeRewrites.some((rewrite) => (rewrite.rewriteId ?? rewrite.id) === rewriteId)) {
-				ctx.ui.notify(`No active context rewrite found for ${rewriteId}.`, "warning");
-				return;
-			}
-			getCorePi(pi).undoContextRewrite(rewriteId);
-			ctx.ui.notify(`Restored context for ${rewriteId}.`, "info");
+			ctx.ui.notify(await unforget(ctx, forgetId), "info");
 		},
 	});
 }
 
 export const __test = {
+	applyForget,
+	buildForgetPlan,
 	contentText,
-	createForgetDirective,
 	formatContextIndex,
 	formatOutputCandidate,
 	formatProjectedContext,
 	formatTurnSummary,
 	groupTurns,
-	hashContextText,
 	parseEntryTarget,
 	parseOutputTarget,
 	parseTurnTarget,
+	projectContext,
 	renderedItemText,
 	summarizeItem,
 };
