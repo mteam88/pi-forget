@@ -719,12 +719,10 @@ async function unforget(ctx: ExtensionCommandContext, forgetId: string): Promise
 }
 
 export default function piForget(pi: ExtensionAPI) {
-	let pendingSyntheticContextRefresh = false;
 	const pendingVisibleLabels = new Set<string>();
 
 	pi.on("context", async (_event, ctx) => {
-		if (!pendingSyntheticContextRefresh) return;
-		pendingSyntheticContextRefresh = false;
+		if (getPiForgetMetadata(ctx.sessionManager.getBranch()).length === 0) return;
 		return { messages: projectContext(ctx).items.map((item) => item.message) };
 	});
 
@@ -802,7 +800,6 @@ export default function piForget(pi: ExtensionAPI) {
 			if (typeof result.details.rewrittenLeafId === "string") {
 				labelSyntheticBranch(pi, ctx, result);
 				if (typeof result.details.forgetId === "string") pendingVisibleLabels.add(result.details.forgetId);
-				pendingSyntheticContextRefresh = true;
 			}
 			return { content: [{ type: "text", text: result.text }], details: result.details };
 		},
