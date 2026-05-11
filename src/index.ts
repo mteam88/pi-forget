@@ -660,6 +660,22 @@ function labelSyntheticBranch(pi: ExtensionAPI, ctx: ExtensionContext, result: A
 	sessionManager(ctx).branch(rewrittenLeafId);
 }
 
+function labelVisibleForgetToolResults(pi: ExtensionAPI, ctx: ExtensionContext, forgetIds: Set<string>): void {
+	if (forgetIds.size === 0) return;
+	const sm = sessionManager(ctx);
+	const restoreLeafId = sm.getLeafId();
+	for (const entry of ctx.sessionManager.getBranch()) {
+		if (entry.type !== "message" || entry.message.role !== "toolResult" || entry.message.toolName !== "forget") continue;
+		const details = entry.message.details;
+		const forgetId = details && typeof details === "object" && "forgetId" in details && typeof details.forgetId === "string" ? details.forgetId : undefined;
+		if (!forgetId || !forgetIds.has(forgetId)) continue;
+		pi.setLabel(entry.id, `pi-forget ${forgetId}`);
+		forgetIds.delete(forgetId);
+	}
+	if (restoreLeafId && ctx.sessionManager.getEntry(restoreLeafId)) sm.branch(restoreLeafId);
+	else sm.resetLeaf();
+}
+
 function getPiForgetMetadata(branch: SessionEntry[]): Array<{ entry: SessionEntry; data: Record<string, unknown> }> {
 	return branch
 		.filter((entry): entry is Extract<SessionEntry, { type: "custom" }> => entry.type === "custom" && entry.customType === CUSTOM_TYPE && !!entry.data && typeof entry.data === "object")
@@ -704,11 +720,16 @@ async function unforget(ctx: ExtensionCommandContext, forgetId: string): Promise
 
 export default function piForget(pi: ExtensionAPI) {
 	let pendingSyntheticContextRefresh = false;
+	const pendingVisibleLabels = new Set<string>();
 
 	pi.on("context", async (_event, ctx) => {
 		if (!pendingSyntheticContextRefresh) return;
 		pendingSyntheticContextRefresh = false;
 		return { messages: projectContext(ctx).items.map((item) => item.message) };
+	});
+
+	pi.on("turn_end", async (_event, ctx) => {
+		labelVisibleForgetToolResults(pi, ctx, pendingVisibleLabels);
 	});
 
 	pi.registerTool({
@@ -780,6 +801,7 @@ export default function piForget(pi: ExtensionAPI) {
 			const result = applyForget(ctx, params.targets, params.reason, params.replacement);
 			if (typeof result.details.rewrittenLeafId === "string") {
 				labelSyntheticBranch(pi, ctx, result);
+				if (typeof result.details.forgetId === "string") pendingVisibleLabels.add(result.details.forgetId);
 				pendingSyntheticContextRefresh = true;
 			}
 			return { content: [{ type: "text", text: result.text }], details: result.details };
