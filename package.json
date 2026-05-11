@@ -16,7 +16,8 @@
     "test": "tsx test/projector.test.ts",
     "test:rpc:smoke": "tsx test/rpc-smoke.ts",
     "test:rpc:provider": "tsx test/rpc-forget-provider.ts",
-    "test:rpc": "npm run test:rpc:smoke && npm run test:rpc:provider",
+    "test:rpc:reload": "tsx test/rpc-reload-tree.ts",
+    "test:rpc": "npm run test:rpc:smoke && npm run test:rpc:provider && npm run test:rpc:reload",
     "check": "npm run typecheck && npm test"
   },
   "peerDependencies": {
