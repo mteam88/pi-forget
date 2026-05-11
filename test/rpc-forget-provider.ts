@@ -27,6 +27,8 @@ type ProviderLog = {
 	hasMagic: boolean;
 	hasReplacement: boolean;
 	roles: string[];
+	userTexts: string[];
+	lastUserText: string | undefined;
 };
 
 function readProviderLogs(path: string): ProviderLog[] {
@@ -66,11 +68,16 @@ export default function (pi: ExtensionAPI) {
 		}],
 		streamSimple(model, context) {
 			call++;
+			const userTexts = context.messages
+				.filter((message: any) => message.role === "user")
+				.map((message: any) => Array.isArray(message.content) ? message.content.filter((block: any) => block.type === "text").map((block: any) => block.text).join("") : String(message.content ?? ""));
 			appendFileSync(${JSON.stringify(providerLog)}, JSON.stringify({
 				call,
 				hasMagic: JSON.stringify(context).includes("MAGIC_SLOP_"),
 				hasReplacement: JSON.stringify(context).includes("provider test replacement") || JSON.stringify(context).includes("[output forgotten by pi-forget:"),
 				roles: context.messages.map((message: any) => message.role),
+				userTexts,
+				lastUserText: userTexts.at(-1),
 			}) + "\\n");
 
 			const stream = createAssistantMessageEventStream();
@@ -220,8 +227,10 @@ try {
 
 	let logs = readProviderLogs(providerLog);
 	assert.equal(logs[0].hasMagic, true, "initial provider request should see original bulky output before forget");
+	assert.equal(logs[0].lastUserText, "trigger tool-driven forget", "initial provider request should answer the submitted prompt");
 	assert.equal(logs[1].hasMagic, false, "provider request immediately after forget tool result should be pruned");
 	assert.equal(logs[1].hasReplacement, true, "provider request immediately after forget should contain replacement text");
+	assert.equal(logs[1].lastUserText, "trigger tool-driven forget", "post-tool provider request should still be grounded in the same user prompt");
 
 	const idlePromptId = send({ type: "prompt", message: "second prompt after forget must stay pruned" });
 	const idlePromptResponse = await waitForResponse(idlePromptId);
@@ -230,6 +239,8 @@ try {
 	logs = readProviderLogs(providerLog);
 	assert.equal(logs[2].hasMagic, false, "later provider requests on the synthetic branch must stay pruned");
 	assert.equal(logs[2].hasReplacement, true, "later provider requests should still use synthetic branch projection");
+	assert.equal(logs[2].lastUserText, "second prompt after forget must stay pruned", "provider should answer the latest prompt after synthetic branch navigation");
+	assert.equal(logs[2].userTexts.filter((text) => text === "second prompt after forget must stay pruned").length, 1, "latest prompt should not be duplicated after synthetic branch navigation");
 
 	const sessionContent = readFileSync(sessionFile, "utf8");
 	const forgetId = sessionContent.match(/"forgetId":"([^"]+)"/)?.[1];
@@ -245,6 +256,7 @@ try {
 	await waitFor(() => readProviderLogs(providerLog).length >= 4);
 	logs = readProviderLogs(providerLog);
 	assert.equal(logs[3].hasMagic, true, "unforget/tree navigation back to original branch should expose original context");
+	assert.equal(logs[3].lastUserText, "after unforget original branch should expose original output", "provider should answer the latest prompt after unforget tree navigation");
 
 	const commandForgetId = send({ type: "prompt", message: "/forget output:bash12345 command-driven refilter" });
 	const commandForgetResponse = await waitForResponse(commandForgetId);
@@ -257,6 +269,8 @@ try {
 	logs = readProviderLogs(providerLog);
 	assert.equal(logs[4].hasMagic, false, "command forget after tree navigation should prune provider context");
 	assert.equal(logs[4].hasReplacement, true, "command forget after tree navigation should use synthetic projection");
+	assert.equal(logs[4].lastUserText, "after command forget should be pruned again", "provider should answer the latest prompt after command forget navigation");
+	assert.equal(logs[4].userTexts.filter((text) => text === "after command forget should be pruned again").length, 1, "latest prompt should not be duplicated after command forget navigation");
 
 	console.log(`rpc provider redaction/tree navigation passed (${sessionFile})`);
 } finally {

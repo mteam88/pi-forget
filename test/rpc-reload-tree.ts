@@ -104,7 +104,7 @@ function startRpc(sessionFile: string, providerExt: string, providerLog: string)
 	};
 }
 
-type ProviderLog = { hasMagic: boolean; hasReplacement: boolean; messageCount: number };
+type ProviderLog = { hasMagic: boolean; hasReplacement: boolean; messageCount: number; userTexts: string[]; lastUserText: string | undefined };
 function readProviderLogs(path: string): ProviderLog[] {
 	if (!existsSync(path)) return [];
 	return readFileSync(path, "utf8")
@@ -132,10 +132,15 @@ export default function (pi: ExtensionAPI) {
 		api: "openai-completions",
 		models: [{ id: "debug", name: "Debug", reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 1000000, maxTokens: 256 }],
 		streamSimple(model, context) {
+			const userTexts = context.messages
+				.filter((message: any) => message.role === "user")
+				.map((message: any) => Array.isArray(message.content) ? message.content.filter((block: any) => block.type === "text").map((block: any) => block.text).join("") : String(message.content ?? ""));
 			appendFileSync(${JSON.stringify(providerLog)}, JSON.stringify({
 				hasMagic: JSON.stringify(context).includes("MAGIC_RELOAD_SLOP_"),
 				hasReplacement: JSON.stringify(context).includes("reload replacement") || JSON.stringify(context).includes("[output forgotten by pi-forget:"),
 				messageCount: context.messages.length,
+				userTexts,
+				lastUserText: userTexts.at(-1),
 			}) + "\\n");
 			const stream = createAssistantMessageEventStream();
 			const output: AssistantMessage = {
@@ -198,6 +203,8 @@ try {
 	let logs = readProviderLogs(providerLog);
 	assert.equal(logs.at(-1)?.hasMagic, false, "restart on a labeled synthetic branch should not reintroduce bulky output");
 	assert.equal(logs.at(-1)?.hasReplacement, true, "restart should preserve synthetic replacement in provider context");
+	assert.equal(logs.at(-1)?.lastUserText, "after restart synthetic branch must remain pruned", "provider should answer the latest prompt after restart on synthetic branch");
+	assert.equal(logs.at(-1)?.userTexts.filter((text) => text === "after restart synthetic branch must remain pruned").length, 1, "latest prompt should not be duplicated after restart on synthetic branch");
 
 	id = rpc.send({ type: "prompt", message: `/unforget ${firstForgetId}` });
 	response = await rpc.waitForResponse(id);
@@ -209,6 +216,7 @@ try {
 	await rpc.waitFor(() => readProviderLogs(providerLog).length >= 2);
 	logs = readProviderLogs(providerLog);
 	assert.equal(logs.at(-1)?.hasMagic, true, "unforget after restart should navigate back to the original branch");
+	assert.equal(logs.at(-1)?.lastUserText, "after unforget original branch should be visible", "provider should answer the latest prompt after unforget following restart");
 
 	id = rpc.send({ type: "prompt", message: "/forget output:bashreload reload replacement" });
 	response = await rpc.waitForResponse(id);
@@ -221,6 +229,8 @@ try {
 	logs = readProviderLogs(providerLog);
 	assert.equal(logs.at(-1)?.hasMagic, false, "second forget after tree navigation should prune provider context");
 	assert.equal(logs.at(-1)?.hasReplacement, true, "second forget after tree navigation should preserve replacement");
+	assert.equal(logs.at(-1)?.lastUserText, "second synthetic branch after unforget should be pruned", "provider should answer latest prompt after second forget navigation");
+	assert.equal(logs.at(-1)?.userTexts.filter((text) => text === "second synthetic branch after unforget should be pruned").length, 1, "latest prompt should not be duplicated after second forget navigation");
 } finally {
 	rpc.stop();
 }

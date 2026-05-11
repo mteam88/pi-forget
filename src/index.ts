@@ -114,6 +114,22 @@ function projectEntry(entry: SessionEntry): ContextItem | undefined {
 	return undefined;
 }
 
+function messageFingerprint(message: AgentMessage): string {
+	return JSON.stringify(message);
+}
+
+function appendVolatileMessageSuffix(projected: AgentMessage[], current: AgentMessage[]): AgentMessage[] {
+	const lastProjected = projected.at(-1);
+	if (!lastProjected) return current;
+	const lastFingerprint = messageFingerprint(lastProjected);
+	for (let i = current.length - 1; i >= 0; i--) {
+		if (messageFingerprint(current[i]) === lastFingerprint) {
+			return [...projected, ...current.slice(i + 1)];
+		}
+	}
+	return projected;
+}
+
 function projectContext(ctx: ExtensionContext): ProjectedContext {
 	const branch = ctx.sessionManager.getBranch();
 	let compaction: SessionEntry | undefined;
@@ -721,9 +737,10 @@ async function unforget(ctx: ExtensionCommandContext, forgetId: string): Promise
 export default function piForget(pi: ExtensionAPI) {
 	const pendingVisibleLabels = new Set<string>();
 
-	pi.on("context", async (_event, ctx) => {
+	pi.on("context", async (event, ctx) => {
 		if (getPiForgetMetadata(ctx.sessionManager.getBranch()).length === 0) return;
-		return { messages: projectContext(ctx).items.map((item) => item.message) };
+		const projected = projectContext(ctx).items.map((item) => item.message);
+		return { messages: appendVolatileMessageSuffix(projected, event.messages) };
 	});
 
 	pi.on("turn_end", async (_event, ctx) => {
