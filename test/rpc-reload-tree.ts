@@ -196,41 +196,42 @@ assert.match(content, /"type":"label"/, "command forget should have appended lab
 
 rpc = startRpc(sessionFile, providerExt, providerLog);
 try {
-	let id = rpc.send({ type: "prompt", message: "after restart synthetic branch must remain pruned" });
+	const promptAndAssertLatest = async (message: string, expectedLogCount: number, options: { pruned: boolean; replacement: boolean }) => {
+		const id = rpc.send({ type: "prompt", message });
+		const response = await rpc.waitForResponse(id);
+		assert.equal(response.success, true);
+		await rpc.waitFor(() => readProviderLogs(providerLog).length >= expectedLogCount);
+		const log = readProviderLogs(providerLog).at(-1);
+		assert(log, `missing provider log for ${message}`);
+		assert.equal(log.hasMagic, !options.pruned, `magic output visibility mismatch for ${message}`);
+		assert.equal(log.hasReplacement, options.replacement, `replacement visibility mismatch for ${message}`);
+		assert.equal(log.lastUserText, message, `provider should answer latest prompt: ${message}`);
+		assert.equal(log.userTexts.filter((text) => text === message).length, 1, `latest prompt should appear exactly once: ${message}`);
+		return log;
+	};
+
+	await promptAndAssertLatest("after restart synthetic branch must remain pruned", 1, { pruned: true, replacement: true });
+
+	let id = rpc.send({ type: "prompt", message: `/unforget ${firstForgetId}` });
 	let response = await rpc.waitForResponse(id);
 	assert.equal(response.success, true);
-	await rpc.waitFor(() => readProviderLogs(providerLog).length >= 1);
-	let logs = readProviderLogs(providerLog);
-	assert.equal(logs.at(-1)?.hasMagic, false, "restart on a labeled synthetic branch should not reintroduce bulky output");
-	assert.equal(logs.at(-1)?.hasReplacement, true, "restart should preserve synthetic replacement in provider context");
-	assert.equal(logs.at(-1)?.lastUserText, "after restart synthetic branch must remain pruned", "provider should answer the latest prompt after restart on synthetic branch");
-	assert.equal(logs.at(-1)?.userTexts.filter((text) => text === "after restart synthetic branch must remain pruned").length, 1, "latest prompt should not be duplicated after restart on synthetic branch");
 
-	id = rpc.send({ type: "prompt", message: `/unforget ${firstForgetId}` });
-	response = await rpc.waitForResponse(id);
-	assert.equal(response.success, true);
-
-	id = rpc.send({ type: "prompt", message: "after unforget original branch should be visible" });
-	response = await rpc.waitForResponse(id);
-	assert.equal(response.success, true);
-	await rpc.waitFor(() => readProviderLogs(providerLog).length >= 2);
-	logs = readProviderLogs(providerLog);
-	assert.equal(logs.at(-1)?.hasMagic, true, "unforget after restart should navigate back to the original branch");
-	assert.equal(logs.at(-1)?.lastUserText, "after unforget original branch should be visible", "provider should answer the latest prompt after unforget following restart");
+	await promptAndAssertLatest("after unforget original branch should be visible", 2, { pruned: false, replacement: false });
 
 	id = rpc.send({ type: "prompt", message: "/forget output:bashreload reload replacement" });
 	response = await rpc.waitForResponse(id);
 	assert.equal(response.success, true);
 
-	id = rpc.send({ type: "prompt", message: "second synthetic branch after unforget should be pruned" });
+	await promptAndAssertLatest("second synthetic branch after unforget should be pruned", 3, { pruned: true, replacement: true });
+	await promptAndAssertLatest("restart scenario rapid prompt one", 4, { pruned: true, replacement: true });
+	await promptAndAssertLatest("restart scenario rapid prompt two", 5, { pruned: true, replacement: true });
+
+	id = rpc.send({ type: "prompt", message: "/forgotten" });
 	response = await rpc.waitForResponse(id);
 	assert.equal(response.success, true);
-	await rpc.waitFor(() => readProviderLogs(providerLog).length >= 3);
-	logs = readProviderLogs(providerLog);
-	assert.equal(logs.at(-1)?.hasMagic, false, "second forget after tree navigation should prune provider context");
-	assert.equal(logs.at(-1)?.hasReplacement, true, "second forget after tree navigation should preserve replacement");
-	assert.equal(logs.at(-1)?.lastUserText, "second synthetic branch after unforget should be pruned", "provider should answer latest prompt after second forget navigation");
-	assert.equal(logs.at(-1)?.userTexts.filter((text) => text === "second synthetic branch after unforget should be pruned").length, 1, "latest prompt should not be duplicated after second forget navigation");
+	assert.equal(readProviderLogs(providerLog).length, 5, "/forgotten after reload should not trigger provider call");
+
+	await promptAndAssertLatest("after forgotten command post-reload latest still wins", 6, { pruned: true, replacement: true });
 } finally {
 	rpc.stop();
 }

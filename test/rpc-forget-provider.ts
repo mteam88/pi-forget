@@ -219,6 +219,20 @@ async function waitFor(predicate: () => boolean, timeoutMs = 12000): Promise<voi
 	throw new Error(`Timed out. stderr=${stderr.join("")}; events=${JSON.stringify(events.slice(-5))}`);
 }
 
+async function promptAndAssertLatest(message: string, expectedLogCount: number, options: { pruned: boolean; replacement: boolean }) {
+	const promptId = send({ type: "prompt", message });
+	const response = await waitForResponse(promptId);
+	assert.equal(response.success, true);
+	await waitFor(() => readProviderLogs(providerLog).length >= expectedLogCount);
+	const log = readProviderLogs(providerLog).at(-1);
+	assert(log, `missing provider log for ${message}`);
+	assert.equal(log.lastUserText, message, `provider should answer latest prompt: ${message}`);
+	assert.equal(log.userTexts.filter((text) => text === message).length, 1, `latest prompt should appear exactly once: ${message}`);
+	assert.equal(log.hasMagic, !options.pruned, `magic output visibility mismatch for ${message}`);
+	assert.equal(log.hasReplacement, options.replacement, `replacement visibility mismatch for ${message}`);
+	return log;
+}
+
 try {
 	const firstPromptId = send({ type: "prompt", message: "trigger tool-driven forget" });
 	const firstPromptResponse = await waitForResponse(firstPromptId);
@@ -232,15 +246,7 @@ try {
 	assert.equal(logs[1].hasReplacement, true, "provider request immediately after forget should contain replacement text");
 	assert.equal(logs[1].lastUserText, "trigger tool-driven forget", "post-tool provider request should still be grounded in the same user prompt");
 
-	const idlePromptId = send({ type: "prompt", message: "second prompt after forget must stay pruned" });
-	const idlePromptResponse = await waitForResponse(idlePromptId);
-	assert.equal(idlePromptResponse.success, true);
-	await waitFor(() => readProviderLogs(providerLog).length >= 3);
-	logs = readProviderLogs(providerLog);
-	assert.equal(logs[2].hasMagic, false, "later provider requests on the synthetic branch must stay pruned");
-	assert.equal(logs[2].hasReplacement, true, "later provider requests should still use synthetic branch projection");
-	assert.equal(logs[2].lastUserText, "second prompt after forget must stay pruned", "provider should answer the latest prompt after synthetic branch navigation");
-	assert.equal(logs[2].userTexts.filter((text) => text === "second prompt after forget must stay pruned").length, 1, "latest prompt should not be duplicated after synthetic branch navigation");
+	await promptAndAssertLatest("second prompt after forget must stay pruned", 3, { pruned: true, replacement: true });
 
 	const sessionContent = readFileSync(sessionFile, "utf8");
 	const forgetId = sessionContent.match(/"forgetId":"([^"]+)"/)?.[1];
@@ -250,27 +256,22 @@ try {
 	const unforgetResponse = await waitForResponse(unforgetId);
 	assert.equal(unforgetResponse.success, true);
 
-	const originalBranchPromptId = send({ type: "prompt", message: "after unforget original branch should expose original output" });
-	const originalBranchPromptResponse = await waitForResponse(originalBranchPromptId);
-	assert.equal(originalBranchPromptResponse.success, true);
-	await waitFor(() => readProviderLogs(providerLog).length >= 4);
-	logs = readProviderLogs(providerLog);
-	assert.equal(logs[3].hasMagic, true, "unforget/tree navigation back to original branch should expose original context");
-	assert.equal(logs[3].lastUserText, "after unforget original branch should expose original output", "provider should answer the latest prompt after unforget tree navigation");
+	await promptAndAssertLatest("after unforget original branch should expose original output", 4, { pruned: false, replacement: true });
 
 	const commandForgetId = send({ type: "prompt", message: "/forget output:bash12345 command-driven refilter" });
 	const commandForgetResponse = await waitForResponse(commandForgetId);
 	assert.equal(commandForgetResponse.success, true);
 
-	const refilteredPromptId = send({ type: "prompt", message: "after command forget should be pruned again" });
-	const refilteredPromptResponse = await waitForResponse(refilteredPromptId);
-	assert.equal(refilteredPromptResponse.success, true);
-	await waitFor(() => readProviderLogs(providerLog).length >= 5);
-	logs = readProviderLogs(providerLog);
-	assert.equal(logs[4].hasMagic, false, "command forget after tree navigation should prune provider context");
-	assert.equal(logs[4].hasReplacement, true, "command forget after tree navigation should use synthetic projection");
-	assert.equal(logs[4].lastUserText, "after command forget should be pruned again", "provider should answer the latest prompt after command forget navigation");
-	assert.equal(logs[4].userTexts.filter((text) => text === "after command forget should be pruned again").length, 1, "latest prompt should not be duplicated after command forget navigation");
+	await promptAndAssertLatest("after command forget should be pruned again", 5, { pruned: true, replacement: true });
+	await promptAndAssertLatest("rapid follow-up one on synthetic branch", 6, { pruned: true, replacement: true });
+	await promptAndAssertLatest("rapid follow-up two on synthetic branch", 7, { pruned: true, replacement: true });
+
+	const forgottenId = send({ type: "prompt", message: "/forgotten" });
+	const forgottenResponse = await waitForResponse(forgottenId);
+	assert.equal(forgottenResponse.success, true);
+	assert.equal(readProviderLogs(providerLog).length, 7, "/forgotten should not trigger a provider request or disturb message ordering");
+
+	await promptAndAssertLatest("after metadata-only command latest prompt still wins", 8, { pruned: true, replacement: true });
 
 	console.log(`rpc provider redaction/tree navigation passed (${sessionFile})`);
 } finally {
