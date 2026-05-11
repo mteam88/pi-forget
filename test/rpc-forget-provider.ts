@@ -22,9 +22,25 @@ function spawnPi(args: string[]) {
 	return spawn("pi", args, { stdio: ["pipe", "pipe", "pipe"] });
 }
 
+type ProviderLog = {
+	call: number;
+	hasMagic: boolean;
+	hasReplacement: boolean;
+	roles: string[];
+};
+
+function readProviderLogs(path: string): ProviderLog[] {
+	if (!existsSync(path)) return [];
+	return readFileSync(path, "utf8")
+		.trim()
+		.split("\n")
+		.filter(Boolean)
+		.map((line) => JSON.parse(line) as ProviderLog);
+}
+
 const dir = mkdtempSync(join(tmpdir(), "pi-forget-verify-"));
 const sessionFile = join(dir, "session.jsonl");
-const providerLog = join(dir, "provider-context.json");
+const providerLog = join(dir, "provider-context.jsonl");
 const providerExt = join(dir, "debug-provider.ts");
 
 writeFileSync(
@@ -34,6 +50,7 @@ import { createAssistantMessageEventStream, calculateCost, type AssistantMessage
 import { appendFileSync } from "node:fs";
 
 export default function (pi: ExtensionAPI) {
+	let call = 0;
 	pi.registerProvider("debug-provider", {
 		baseUrl: "http://debug.local",
 		apiKey: "DEBUG_API_KEY",
@@ -48,6 +65,14 @@ export default function (pi: ExtensionAPI) {
 			maxTokens: 256,
 		}],
 		streamSimple(model, context) {
+			call++;
+			appendFileSync(${JSON.stringify(providerLog)}, JSON.stringify({
+				call,
+				hasMagic: JSON.stringify(context).includes("MAGIC_SLOP_"),
+				hasReplacement: JSON.stringify(context).includes("provider test replacement") || JSON.stringify(context).includes("[output forgotten by pi-forget:"),
+				roles: context.messages.map((message: any) => message.role),
+			}) + "\\n");
+
 			const stream = createAssistantMessageEventStream();
 			const output: AssistantMessage = {
 				role: "assistant",
@@ -63,11 +88,35 @@ export default function (pi: ExtensionAPI) {
 					totalTokens: 0,
 					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 				},
-				stopReason: "stop",
+				stopReason: call === 1 ? "toolUse" : "stop",
 				timestamp: Date.now(),
 			};
+
 			queueMicrotask(() => {
-				appendFileSync(${JSON.stringify(providerLog)}, JSON.stringify(context, null, 2));
+				if (call === 1) {
+					const toolCall = {
+						type: "toolCall" as const,
+						id: "forget-call-1",
+						name: "forget",
+						arguments: {
+							targets: ["output:bash12345"],
+							reason: "provider-driven forget test",
+							replacement: "provider test replacement",
+						},
+					};
+					output.content.push(toolCall);
+					stream.push({ type: "start", partial: output });
+					stream.push({ type: "toolcall_start", contentIndex: 0, partial: output });
+					stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial: output });
+					output.usage.input = 1;
+					output.usage.output = 1;
+					output.usage.totalTokens = 2;
+					calculateCost(model as any, output.usage);
+					stream.push({ type: "done", reason: "toolUse", message: output });
+					stream.end();
+					return;
+				}
+
 				output.content.push({ type: "text", text: "ok" });
 				stream.push({ type: "start", partial: output });
 				stream.push({ type: "text_start", contentIndex: 0, partial: output });
@@ -88,10 +137,11 @@ export default function (pi: ExtensionAPI) {
 );
 
 const now = new Date().toISOString();
+const usage = { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
 const entries = [
 	{ type: "session", version: 3, id: "018f0000-0000-7000-8000-000000000000", timestamp: now, cwd: process.cwd() },
 	{ type: "message", id: "u0000001", parentId: null, timestamp: now, message: { role: "user", content: [{ type: "text", text: "before bash" }], timestamp: Date.now() } },
-	{ type: "message", id: "a0000001", parentId: "u0000001", timestamp: now, message: { role: "assistant", content: [{ type: "text", text: "ok" }], api: "test", provider: "debug-provider", model: "debug", usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "stop", timestamp: Date.now() } },
+	{ type: "message", id: "a0000001", parentId: "u0000001", timestamp: now, message: { role: "assistant", content: [{ type: "text", text: "ok" }], api: "test", provider: "debug-provider", model: "debug", usage, stopReason: "stop", timestamp: Date.now() } },
 	{ type: "message", id: "bash12345", parentId: "a0000001", timestamp: now, message: { role: "bashExecution", command: "python3 - <<'PY' ...", output: "MAGIC_SLOP_".repeat(4000), exitCode: 0, cancelled: false, truncated: false, timestamp: Date.now(), excludeFromContext: false } },
 ];
 writeFileSync(sessionFile, `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`);
@@ -137,7 +187,7 @@ function send(command: Record<string, unknown>): string {
 	return id;
 }
 
-function waitForResponse(id: string, timeoutMs = 8000): Promise<any> {
+function waitForResponse(id: string, timeoutMs = 12000): Promise<any> {
 	return new Promise((resolvePromise, reject) => {
 		const started = Date.now();
 		const timer = setInterval(() => {
@@ -153,29 +203,62 @@ function waitForResponse(id: string, timeoutMs = 8000): Promise<any> {
 	});
 }
 
-async function waitFor(predicate: () => boolean, timeoutMs = 8000): Promise<void> {
+async function waitFor(predicate: () => boolean, timeoutMs = 12000): Promise<void> {
 	const started = Date.now();
 	while (Date.now() - started <= timeoutMs) {
 		if (predicate()) return;
 		await new Promise((r) => setTimeout(r, 25));
 	}
-	throw new Error(`Timed out. stderr=${stderr.join("")}`);
+	throw new Error(`Timed out. stderr=${stderr.join("")}; events=${JSON.stringify(events.slice(-5))}`);
 }
 
-const forgetId = send({ type: "prompt", message: `/forget output:bash12345 manual test` });
-const forgetResponse = await waitForResponse(forgetId);
-assert.equal(forgetResponse.success, true);
+try {
+	const firstPromptId = send({ type: "prompt", message: "trigger tool-driven forget" });
+	const firstPromptResponse = await waitForResponse(firstPromptId);
+	assert.equal(firstPromptResponse.success, true);
+	await waitFor(() => readProviderLogs(providerLog).length >= 2);
 
-const promptId = send({ type: "prompt", message: "say ok" });
-const promptResponse = await waitForResponse(promptId);
-assert.equal(promptResponse.success, true);
-await waitFor(() => existsSync(providerLog) && readFileSync(providerLog, "utf8").length > 0);
+	let logs = readProviderLogs(providerLog);
+	assert.equal(logs[0].hasMagic, true, "initial provider request should see original bulky output before forget");
+	assert.equal(logs[1].hasMagic, false, "provider request immediately after forget tool result should be pruned");
+	assert.equal(logs[1].hasReplacement, true, "provider request immediately after forget should contain replacement text");
 
-const providerContext = readFileSync(providerLog, "utf8");
-const containsMagic = providerContext.includes("MAGIC_SLOP_");
-const containsPlaceholder = providerContext.includes("[output forgotten by pi-forget:");
-assert.equal(containsMagic, false);
-assert.equal(containsPlaceholder, true);
+	const idlePromptId = send({ type: "prompt", message: "second prompt after forget must stay pruned" });
+	const idlePromptResponse = await waitForResponse(idlePromptId);
+	assert.equal(idlePromptResponse.success, true);
+	await waitFor(() => readProviderLogs(providerLog).length >= 3);
+	logs = readProviderLogs(providerLog);
+	assert.equal(logs[2].hasMagic, false, "later provider requests on the synthetic branch must stay pruned");
+	assert.equal(logs[2].hasReplacement, true, "later provider requests should still use synthetic branch projection");
 
-child.kill("SIGTERM");
-console.log(`rpc provider redaction passed (${sessionFile})`);
+	const sessionContent = readFileSync(sessionFile, "utf8");
+	const forgetId = sessionContent.match(/"forgetId":"([^"]+)"/)?.[1];
+	assert(forgetId, "forget id persisted");
+
+	const unforgetId = send({ type: "prompt", message: `/unforget ${forgetId}` });
+	const unforgetResponse = await waitForResponse(unforgetId);
+	assert.equal(unforgetResponse.success, true);
+
+	const originalBranchPromptId = send({ type: "prompt", message: "after unforget original branch should expose original output" });
+	const originalBranchPromptResponse = await waitForResponse(originalBranchPromptId);
+	assert.equal(originalBranchPromptResponse.success, true);
+	await waitFor(() => readProviderLogs(providerLog).length >= 4);
+	logs = readProviderLogs(providerLog);
+	assert.equal(logs[3].hasMagic, true, "unforget/tree navigation back to original branch should expose original context");
+
+	const commandForgetId = send({ type: "prompt", message: "/forget output:bash12345 command-driven refilter" });
+	const commandForgetResponse = await waitForResponse(commandForgetId);
+	assert.equal(commandForgetResponse.success, true);
+
+	const refilteredPromptId = send({ type: "prompt", message: "after command forget should be pruned again" });
+	const refilteredPromptResponse = await waitForResponse(refilteredPromptId);
+	assert.equal(refilteredPromptResponse.success, true);
+	await waitFor(() => readProviderLogs(providerLog).length >= 5);
+	logs = readProviderLogs(providerLog);
+	assert.equal(logs[4].hasMagic, false, "command forget after tree navigation should prune provider context");
+	assert.equal(logs[4].hasReplacement, true, "command forget after tree navigation should use synthetic projection");
+
+	console.log(`rpc provider redaction/tree navigation passed (${sessionFile})`);
+} finally {
+	child.kill("SIGTERM");
+}
