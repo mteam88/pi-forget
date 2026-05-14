@@ -1038,7 +1038,7 @@ function maybeSendContextUsageHint(pi: ExtensionAPI, ctx: ExtensionContext, stat
 	const rounded = Math.round(percent);
 	sendCleanupHint(
 		pi,
-		`pi-forget hint: Context just crossed ${bucket}% and appears to be about ${rounded}% full. This may be a good opportunity to save tokens by replacing stale large tool outputs with detailed summaries using forget({ targets: ["output:<id>"], replacement: <your detailed summary> }).`,
+		`pi-forget hint: Context just crossed ${bucket}% and appears to be about ${rounded}% full. This may be a good opportunity to save tokens. Consider using list_context({ detail: "outputs", minChars: 20000 }) to find stale large outputs, then replacing useful ones with detailed summaries via forget({ targets: ["output:<id>"], replacement: <your detailed summary> }).`,
 		{ contextPercent: rounded, contextBucket: bucket },
 	);
 	state.contextUsageHintedThisTurn = true;
