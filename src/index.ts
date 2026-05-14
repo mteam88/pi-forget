@@ -17,7 +17,7 @@ const DEFAULT_OUTPUT_LIMIT = 20;
 const MAX_OUTPUT_LIMIT = 100;
 const LARGE_OUTPUT_HINT_CHARS = 20_000;
 const MAX_LARGE_OUTPUT_HINTS_PER_TURN = 3;
-const CONTEXT_USAGE_HINT_PERCENT = 80;
+const CONTEXT_USAGE_HINT_BUCKETS = [80, 90] as const;
 const CUSTOM_TYPE = "pi-forget";
 
 type ListContextDetail = "summary" | "entries" | "outputs";
@@ -78,7 +78,7 @@ interface HintState {
 	hintedOutputEntryIds: Set<string>;
 	hintsThisTurn: number;
 	contextUsageHintedThisTurn: boolean;
-	lastContextUsageHintPercent?: number;
+	warnedContextUsageBuckets: Set<number>;
 }
 
 type MessageRecord = Record<string, unknown> & { role?: string };
@@ -1004,19 +1004,24 @@ function sendCleanupHint(pi: ExtensionAPI, content: string, details: Record<stri
 	);
 }
 
+function nextContextUsageBucket(percent: number, state: HintState): number | undefined {
+	return CONTEXT_USAGE_HINT_BUCKETS.find((bucket) => percent >= bucket && !state.warnedContextUsageBuckets.has(bucket));
+}
+
 function maybeSendContextUsageHint(pi: ExtensionAPI, ctx: ExtensionContext, state: HintState): boolean {
 	if (state.contextUsageHintedThisTurn) return false;
 	const percent = contextUsagePercent(ctx);
-	if (percent === undefined || percent < CONTEXT_USAGE_HINT_PERCENT) return false;
+	if (percent === undefined) return false;
+	const bucket = nextContextUsageBucket(percent, state);
+	if (bucket === undefined) return false;
 	const rounded = Math.round(percent);
-	if (state.lastContextUsageHintPercent !== undefined && rounded < state.lastContextUsageHintPercent + 5) return false;
 	sendCleanupHint(
 		pi,
-		`pi-forget hint: Context appears to be about ${rounded}% full. This may be a good opportunity to save tokens by replacing stale large tool outputs with detailed summaries using forget({ targets: ["output:<id>"], replacement: <your detailed summary> }).`,
-		{ contextPercent: rounded },
+		`pi-forget hint: Context just crossed ${bucket}% and appears to be about ${rounded}% full. This may be a good opportunity to save tokens by replacing stale large tool outputs with detailed summaries using forget({ targets: ["output:<id>"], replacement: <your detailed summary> }).`,
+		{ contextPercent: rounded, contextBucket: bucket },
 	);
 	state.contextUsageHintedThisTurn = true;
-	state.lastContextUsageHintPercent = rounded;
+	state.warnedContextUsageBuckets.add(bucket);
 	return true;
 }
 
@@ -1030,8 +1035,9 @@ function maybeSendLargeOutputHint(
 	if (!entry || state.hintedOutputEntryIds.has(entry.id) || state.hintsThisTurn >= MAX_LARGE_OUTPUT_HINTS_PER_TURN) return false;
 	const target = `output:${entry.id}`;
 	const percent = contextUsagePercent(ctx);
-	const contextSentence = percent !== undefined && percent >= CONTEXT_USAGE_HINT_PERCENT
-		? ` Context appears to be about ${Math.round(percent)}% full, so summarizing stale large outputs may be especially useful.`
+	const bucket = percent === undefined ? undefined : nextContextUsageBucket(percent, state);
+	const contextSentence = bucket !== undefined && percent !== undefined
+		? ` Context just crossed ${bucket}% and appears to be about ${Math.round(percent)}% full, so summarizing stale large outputs may be especially useful.`
 		: "";
 	const callSentence = hint.callDescription ? ` It came from: ${hint.callDescription}.` : "";
 	const previewSentence = hint.outputPreview ? ` Output starts: "${hint.outputPreview}".` : "";
@@ -1042,9 +1048,9 @@ function maybeSendLargeOutputHint(
 	);
 	state.hintedOutputEntryIds.add(entry.id);
 	state.hintsThisTurn++;
-	if (percent !== undefined && percent >= CONTEXT_USAGE_HINT_PERCENT) {
+	if (bucket !== undefined) {
 		state.contextUsageHintedThisTurn = true;
-		state.lastContextUsageHintPercent = Math.max(state.lastContextUsageHintPercent ?? 0, Math.round(percent));
+		state.warnedContextUsageBuckets.add(bucket);
 	}
 	return true;
 }
@@ -1052,10 +1058,11 @@ function maybeSendLargeOutputHint(
 export default function piForget(pi: ExtensionAPI) {
 	const pendingVisibleLabels = new Set<string>();
 	const pendingLargeOutputHints = new Map<string, PendingLargeOutputHint>();
-	const hintState = {
+	const hintState: HintState = {
 		hintedOutputEntryIds: new Set<string>(),
 		hintsThisTurn: 0,
 		contextUsageHintedThisTurn: false,
+		warnedContextUsageBuckets: new Set<number>(),
 	};
 
 	pi.on("context", async (event, ctx) => {
@@ -1089,7 +1096,6 @@ export default function piForget(pi: ExtensionAPI) {
 		for (const [toolCallId, hint] of pendingLargeOutputHints) {
 			if (maybeSendLargeOutputHint(pi, ctx, hintState, hint)) pendingLargeOutputHints.delete(toolCallId);
 		}
-		maybeSendContextUsageHint(pi, ctx, hintState);
 		labelVisibleForgetToolResults(pi, ctx, pendingVisibleLabels);
 	});
 
