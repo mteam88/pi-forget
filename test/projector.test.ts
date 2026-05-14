@@ -87,13 +87,12 @@ function makeCtx(sm: SessionManager): any {
 	assert.match(entries, /bashExecution .*:/);
 
 	const outputs = __test.formatContextIndex(ctx, "recent", 12, "outputs", 1);
+	assert.match(outputs, /Large output targets, grouped by where they appear in the conversation:/);
 	assert.match(outputs, new RegExp(`output:${bashId}`));
-	assert.match(outputs, /Apply with:/);
-	assert.match(outputs, new RegExp(`forget\\(\\{ targets: \\["output:${bashId}"\\]`));
-	assert.doesNotMatch(outputs, /turn:1  user/);
+	assert.match(outputs, /turn:1  user/);
 
 	const filtered = __test.formatContextIndex(ctx, "recent", 12, "outputs", undefined, { minChars: 20 });
-	assert.match(filtered, /No forgettable outputs/);
+	assert.match(filtered, /No output targets found/);
 }
 
 {
@@ -110,7 +109,8 @@ function makeCtx(sm: SessionManager): any {
 	assert.match(summary, new RegExp(`output:${bashId}  prelude, bashExecution`));
 
 	const outputs = __test.formatContextIndex(ctx, "recent", 12, "outputs");
-	assert.match(outputs, new RegExp(`output:${bashId}  prelude, bashExecution`));
+	assert.match(outputs, /prelude  2 entries, 14 output chars/);
+	assert.match(outputs, new RegExp(`output:${bashId}  bashExecution`));
 }
 
 {

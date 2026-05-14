@@ -370,17 +370,6 @@ function formatOutputCandidate(candidate: { item: ContextItem; output: string },
 	return `output:${candidate.item.entryId}  ${sourcePrefix}${kind}, ${candidate.output.length} chars, "${compactText(candidate.output, SUMMARY_SNIPPET_CHARS)}"`;
 }
 
-function formatForgetSnippet(candidates: Array<{ item: ContextItem; output: string }>): string | undefined {
-	if (!candidates.length) return undefined;
-	const targets = candidates.map((candidate) => `"output:${candidate.item.entryId}"`);
-	const summaryPrompt = "Detailed summary preserving key findings, errors, commands/files, conclusions, and remaining uncertainty.";
-	if (targets.length === 1) {
-		return `forget({ targets: [${targets[0]}], reason: "summarize stale bulky output", replacement: "${summaryPrompt}" })`;
-	}
-	const replacements = candidates.map((candidate) => `    "output:${candidate.item.entryId}": "${summaryPrompt}"`).join(",\n");
-	return `forget({\n  targets: [${targets.join(", ")}],\n  reason: "summarize stale bulky outputs",\n  replacements: {\n${replacements}\n  }\n})`;
-}
-
 function sourceLabels(prelude: ContextItem[], turns: Turn[], includePrelude: boolean): Map<string, string> {
 	const labels = new Map<string, string>();
 	if (includePrelude) {
@@ -390,6 +379,30 @@ function sourceLabels(prelude: ContextItem[], turns: Turn[], includePrelude: boo
 		for (const item of turn.items) labels.set(item.entryId, `turn:${turn.number}`);
 	}
 	return labels;
+}
+
+function pushGroupedOutputCandidates(
+	lines: string[],
+	candidates: Array<{ item: ContextItem; output: string }>,
+	prelude: ContextItem[],
+	turns: Turn[],
+	includePrelude: boolean,
+): void {
+	const byEntryId = new Map(candidates.map((candidate) => [candidate.item.entryId, candidate]));
+	if (includePrelude) {
+		const preludeCandidates = prelude.map((item) => byEntryId.get(item.entryId)).filter((candidate): candidate is { item: ContextItem; output: string } => candidate !== undefined);
+		if (preludeCandidates.length) {
+			const suffix = countOutputChars(prelude) > 0 ? `, ${countOutputChars(prelude)} output chars` : "";
+			lines.push(`prelude  ${prelude.length} entries${suffix}`);
+			for (const candidate of preludeCandidates) lines.push(`  ${formatOutputCandidate(candidate)}`);
+		}
+	}
+	for (const turn of turns) {
+		const turnCandidates = turn.items.map((item) => byEntryId.get(item.entryId)).filter((candidate): candidate is { item: ContextItem; output: string } => candidate !== undefined);
+		if (!turnCandidates.length) continue;
+		lines.push(formatTurnSummary(turn));
+		for (const candidate of turnCandidates) lines.push(`  ${formatOutputCandidate(candidate)}`);
+	}
 }
 
 function formatProjectedContext(
@@ -447,11 +460,10 @@ function formatProjectedContext(
 	} else if (detail === "outputs") {
 		const candidates = getOutputCandidates(outputItems, outputOptions);
 		if (!candidates.length) {
-			lines.push("No forgettable outputs in selected context.");
+			lines.push("No output targets found in selected context.");
 		} else {
-			for (const candidate of candidates) lines.push(formatOutputCandidate(candidate, labels.get(candidate.item.entryId)));
-			const snippet = formatForgetSnippet(candidates);
-			if (snippet) lines.push("", "Apply with:", snippet);
+			lines.push("Large output targets, grouped by where they appear in the conversation:", "");
+			pushGroupedOutputCandidates(lines, candidates, prelude, outputTurns, includePreludeOutputs);
 		}
 	} else {
 		for (const turn of selectedTurns) {
