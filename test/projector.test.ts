@@ -167,6 +167,22 @@ function makeCtx(sm: SessionManager): any {
 
 {
 	const sm = makeSession();
+	sm.appendMessage(user("run commands"));
+	const first = sm.appendMessage(bash("printf first", "FIRST RAW"));
+	const second = sm.appendMessage(bash("printf second", "SECOND RAW"));
+	sm.appendMessage(user("current"));
+	__test.applyForget(makeCtx(sm), [`output:${first}`], "large", "First output summary");
+	const result = __test.applyForget(makeCtx(sm), [`output:${second}`], "large", "Second output summary");
+	assert.match(result.text, new RegExp(`output:${second}`));
+	const serialized = JSON.stringify(sm.buildSessionContext().messages);
+	assert.doesNotMatch(serialized, /FIRST RAW/);
+	assert.doesNotMatch(serialized, /SECOND RAW/);
+	assert.match(serialized, /First output summary/);
+	assert.match(serialized, /Second output summary/);
+}
+
+{
+	const sm = makeSession();
 	const u1 = sm.appendMessage(user("secret context"));
 	sm.appendMessage(user("current"));
 	const result = __test.applyForget(makeCtx(sm), [`entry:${u1}`]);

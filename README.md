@@ -4,7 +4,7 @@ A pi extension for reversible, branch-local context forgetting.
 
 `pi-forget` lets the model move future work onto a cleaned synthetic branch, omitting stale prior turns or redacting large outputs without deleting or rewriting JSONL session history. It is a context-budget cleanup tool, not a security/privacy tool: it does not erase session history, logs, or other copies of leaked secrets/tokens.
 
-The original branch remains intact. A forget operation creates a sibling branch from the earliest affected entry, replays kept history, inserts replacement summaries/placeholders, and records metadata so `/unforget` can jump back to the original branch.
+The original branch remains intact. A forget operation creates a sibling branch from the earliest affected entry, replays kept history, inserts replacement summaries/placeholders, and records metadata so `/unforget` can jump back to the original branch. Replayed entries get new session ids, but pi-forget records aliases so older `entry:<id>` and `output:<id>` targets usually continue to resolve after additional cleanup passes.
 
 ## Install
 

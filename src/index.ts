@@ -55,6 +55,12 @@ interface RewritePlan {
 	redactOutput: Map<string, string>;
 }
 
+interface TargetResolution {
+	item?: ContextItem;
+	resolvedId?: string;
+	ambiguousIds?: string[];
+}
+
 interface ApplyForgetResult {
 	text: string;
 	details: Record<string, unknown>;
@@ -517,6 +523,59 @@ function existingPiForgetCount(branch: SessionEntry[]): number {
 	return branch.filter((entry) => entry.type === "custom" && entry.customType === CUSTOM_TYPE).length;
 }
 
+function aliasTargetsFromBranch(branch: SessionEntry[]): Map<string, Set<string>> {
+	const aliases = new Map<string, Set<string>>();
+	for (const entry of branch) {
+		if (entry.type !== "custom" || entry.customType !== CUSTOM_TYPE || !entry.data || typeof entry.data !== "object") continue;
+		const rawAliases = (entry.data as Record<string, unknown>).aliases;
+		if (!rawAliases || typeof rawAliases !== "object" || Array.isArray(rawAliases)) continue;
+		for (const [sourceId, clonedId] of Object.entries(rawAliases)) {
+			if (typeof clonedId !== "string") continue;
+			const targets = aliases.get(sourceId) ?? new Set<string>();
+			targets.add(clonedId);
+			aliases.set(sourceId, targets);
+		}
+	}
+	return aliases;
+}
+
+function findVisibleItem(items: ContextItem[], entryId: string, predicate: (item: ContextItem) => boolean): ContextItem | undefined {
+	return items.find((candidate) => (candidate.entryId === entryId || candidate.sourceEntryIds.includes(entryId)) && predicate(candidate));
+}
+
+function resolveVisibleItem(
+	items: ContextItem[],
+	aliasTargets: Map<string, Set<string>>,
+	entryId: string,
+	predicate: (item: ContextItem) => boolean,
+): TargetResolution {
+	const direct = findVisibleItem(items, entryId, predicate);
+	if (direct) return { item: direct, resolvedId: entryId };
+
+	const aliasedIds = aliasTargets.get(entryId);
+	if (!aliasedIds?.size) return {};
+
+	const matches = new Map<string, ContextItem>();
+	for (const aliasedId of aliasedIds) {
+		const item = findVisibleItem(items, aliasedId, predicate);
+		if (item) matches.set(item.entryId, item);
+	}
+	if (matches.size === 1) {
+		const [[resolvedId, item]] = [...matches.entries()];
+		return { item, resolvedId };
+	}
+	if (matches.size > 1) return { ambiguousIds: [...matches.keys()] };
+	return {};
+}
+
+function aliasesForReplayedEntry(aliasTargets: Map<string, Set<string>>, originalId: string, clonedId: string): Record<string, string> {
+	const aliases: Record<string, string> = { [originalId]: clonedId };
+	for (const [sourceId, targets] of aliasTargets) {
+		if (targets.has(originalId)) aliases[sourceId] = clonedId;
+	}
+	return aliases;
+}
+
 function buildForgetPlan(
 	ctx: ExtensionContext,
 	targets: string[],
@@ -529,6 +588,7 @@ function buildForgetPlan(
 	const { turns } = groupTurns(items);
 	const latestTurn = turns.at(-1)?.number;
 	const indexById = branchIndexById(branch);
+	const aliasTargets = aliasTargetsFromBranch(branch);
 	const plan: RewritePlan = {
 		id: makeRewriteId(existingPiForgetCount(branch)),
 		targets,
@@ -578,10 +638,21 @@ function buildForgetPlan(
 		const outputEntryId = parseOutputTarget(target);
 		if (outputEntryId !== undefined) {
 			const canonicalTarget = `output:${outputEntryId}`;
-			const item = items.find((candidate) => (candidate.entryId === outputEntryId || candidate.sourceEntryIds.includes(outputEntryId)) && outputSurfaceText(candidate) !== undefined);
-			if (!item) return { error: { text: `Unknown output entry ${outputEntryId}, or entry has no separable output.`, details: { error: "unknown_output", target } } };
-			const rewriteEntryId = sourceEntryIds(item).find((id) => id === outputEntryId) ?? item.entryId;
-			plan.redactOutput.set(rewriteEntryId, replacementForTarget("output", outputEntryId, [target, canonicalTarget, outputEntryId], replacement, replacements));
+			const resolved = resolveVisibleItem(items, aliasTargets, outputEntryId, (item) => outputSurfaceText(item) !== undefined);
+			if (resolved.ambiguousIds) {
+				return {
+					error: {
+						text: `Ambiguous output entry ${outputEntryId} after synthetic branch replay. Re-run list_context for current targets.`,
+						details: { error: "ambiguous_output", target, matches: resolved.ambiguousIds },
+					},
+				};
+			}
+			if (!resolved.item || !resolved.resolvedId) return { error: { text: `Unknown output entry ${outputEntryId}, or entry has no separable output.`, details: { error: "unknown_output", target } } };
+			const rewriteEntryId = sourceEntryIds(resolved.item).find((id) => id === resolved.resolvedId) ?? resolved.item.entryId;
+			plan.redactOutput.set(
+				rewriteEntryId,
+				replacementForTarget("output", outputEntryId, [target, canonicalTarget, outputEntryId, `output:${resolved.resolvedId}`, resolved.resolvedId], replacement, replacements),
+			);
 			markChanged(rewriteEntryId);
 			continue;
 		}
@@ -589,10 +660,21 @@ function buildForgetPlan(
 		const entryId = parseEntryTarget(target);
 		if (entryId !== undefined) {
 			const canonicalTarget = `entry:${entryId}`;
-			const item = items.find((candidate) => candidate.entryId === entryId || candidate.sourceEntryIds.includes(entryId));
-			if (!item) return { error: { text: `Unknown entry ${entryId}. Run list_context for current visible entries.`, details: { error: "unknown_entry", target } } };
-			const rewriteEntryId = sourceEntryIds(item).find((id) => id === entryId) ?? item.entryId;
-			plan.replaceEntry.set(rewriteEntryId, replacementForTarget("entry", entryId, [target, canonicalTarget, entryId], replacement, replacements));
+			const resolved = resolveVisibleItem(items, aliasTargets, entryId, () => true);
+			if (resolved.ambiguousIds) {
+				return {
+					error: {
+						text: `Ambiguous entry ${entryId} after synthetic branch replay. Re-run list_context for current targets.`,
+						details: { error: "ambiguous_entry", target, matches: resolved.ambiguousIds },
+					},
+				};
+			}
+			if (!resolved.item || !resolved.resolvedId) return { error: { text: `Unknown entry ${entryId}. Run list_context for current visible entries.`, details: { error: "unknown_entry", target } } };
+			const rewriteEntryId = sourceEntryIds(resolved.item).find((id) => id === resolved.resolvedId) ?? resolved.item.entryId;
+			plan.replaceEntry.set(
+				rewriteEntryId,
+				replacementForTarget("entry", entryId, [target, canonicalTarget, entryId, `entry:${resolved.resolvedId}`, resolved.resolvedId], replacement, replacements),
+			);
 			markChanged(rewriteEntryId);
 			continue;
 		}
@@ -665,7 +747,7 @@ function appendReplacement(sm: MutableSessionManager, text: string, plan: Rewrit
 	});
 }
 
-function appendMetadata(sm: MutableSessionManager, plan: RewritePlan, rewrittenFromId: string | null): string {
+function appendMetadata(sm: MutableSessionManager, plan: RewritePlan, rewrittenFromId: string | null, aliases: Record<string, string>): string {
 	return sm.appendCustomEntry(CUSTOM_TYPE, {
 		kind: "synthetic_branch",
 		forgetId: plan.id,
@@ -673,6 +755,7 @@ function appendMetadata(sm: MutableSessionManager, plan: RewritePlan, rewrittenF
 		reason: plan.reason,
 		replacement: plan.replacement,
 		replacements: plan.replacements,
+		aliases,
 		originalLeafId: plan.originalLeafId,
 		rewrittenFromId,
 		createdAt: Date.now(),
@@ -683,6 +766,8 @@ function applyForgetPlan(ctx: ExtensionContext, plan: RewritePlan): ApplyForgetR
 	const sm = sessionManager(ctx);
 	const branch = ctx.sessionManager.getBranch();
 	const parentId = branch[plan.firstChangedIndex]?.parentId ?? null;
+	const aliasTargets = aliasTargetsFromBranch(branch);
+	const aliases: Record<string, string> = {};
 	if (parentId) sm.branch(parentId);
 	else sm.resetLeaf();
 
@@ -702,10 +787,13 @@ function applyForgetPlan(ctx: ExtensionContext, plan: RewritePlan): ApplyForgetR
 			continue;
 		}
 		const cloned = appendClonedEntry(sm, entry, plan.redactOutput.get(entry.id));
-		if (cloned) appended++;
+		if (cloned) {
+			Object.assign(aliases, aliasesForReplayedEntry(aliasTargets, entry.id, cloned));
+			appended++;
+		}
 	}
 	const rewrittenContentLeafId = sm.getLeafId();
-	const syntheticLeafId = appendMetadata(sm, plan, rewrittenContentLeafId);
+	const syntheticLeafId = appendMetadata(sm, plan, rewrittenContentLeafId, aliases);
 
 	return {
 		text: `Created synthetic pi-forget branch ${plan.id} for ${plan.targets.join(", ")}. Original session history is unchanged. Use /unforget ${plan.id} to return to the original branch.`,
