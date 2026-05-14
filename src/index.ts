@@ -973,7 +973,7 @@ function findToolCallDescription(ctx: ExtensionContext, toolCallId: string): str
 		for (const block of asContentBlocks(msg.content)) {
 			if (block.type !== "toolCall" || block.id !== toolCallId) continue;
 			const name = typeof block.name === "string" && block.name ? block.name : "tool";
-			return `${name}(${compactJson(block.arguments ?? {}, 260)})`;
+			return `${name}(${compactJson(block.arguments ?? {}, 180)})`;
 		}
 	}
 	return undefined;
@@ -1004,7 +1004,7 @@ function maybeSendContextUsageHint(pi: ExtensionAPI, ctx: ExtensionContext, stat
 	const rounded = Math.round(percent);
 	sendCleanupHint(
 		pi,
-		`pi-forget hint: Context appears to be about ${rounded}% full. This may be a good opportunity to save tokens by replacing stale large tool outputs with detailed summaries, for example: forget({ targets: ["output:<id>"], replacement: "Detailed summary preserving key findings, errors, commands/files, conclusions, and remaining uncertainty." }).`,
+		`pi-forget hint: Context appears to be about ${rounded}% full. This may be a good opportunity to save tokens by replacing stale large tool outputs with detailed summaries using forget({ targets: ["output:<id>"], replacement: <your detailed summary> }).`,
 		{ contextPercent: rounded },
 	);
 	state.contextUsageHintedThisTurn = true;
@@ -1028,7 +1028,7 @@ function maybeSendLargeOutputHint(
 	const previewSentence = hint.outputPreview ? ` Output starts: "${hint.outputPreview}".` : "";
 	sendCleanupHint(
 		pi,
-		`pi-forget hint: Large ${hint.toolName} output ${target} is ${hint.chars} chars (~${approxTokens(hint.chars)} tokens).${callSentence}${previewSentence} In the future, after using the useful facts, this may be a good opportunity to save tokens by replacing the raw output with a detailed summary: forget({ targets: ["${target}"], replacement: "Detailed summary preserving key findings, errors, commands/files, conclusions, and remaining uncertainty." }).${contextSentence}`,
+		`pi-forget hint: Large ${hint.toolName} output is available as ${target} (${hint.chars} chars, ~${approxTokens(hint.chars)} tokens).${callSentence}${previewSentence} In the future, after using the useful facts, this may be a good opportunity to save tokens by replacing the raw output with a detailed summary using forget({ targets: ["${target}"], replacement: <your detailed summary> }).${contextSentence}`,
 		{ outputTarget: target, toolName: hint.toolName, chars: hint.chars, approxTokens: approxTokens(hint.chars), callDescription: hint.callDescription, outputPreview: hint.outputPreview, contextPercent: percent === undefined ? undefined : Math.round(percent) },
 	);
 	state.hintedOutputEntryIds.add(entry.id);
