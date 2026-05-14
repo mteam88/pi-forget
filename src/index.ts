@@ -74,6 +74,13 @@ interface PendingLargeOutputHint {
 	outputPreview?: string;
 }
 
+interface HintState {
+	hintedOutputEntryIds: Set<string>;
+	hintsThisTurn: number;
+	contextUsageHintedThisTurn: boolean;
+	lastContextUsageHintPercent?: number;
+}
+
 type MessageRecord = Record<string, unknown> & { role?: string };
 type ContentBlock = Record<string, unknown> & { type?: string };
 type MutableSessionManager = SessionManager;
@@ -997,24 +1004,26 @@ function sendCleanupHint(pi: ExtensionAPI, content: string, details: Record<stri
 	);
 }
 
-function maybeSendContextUsageHint(pi: ExtensionAPI, ctx: ExtensionContext, state: { contextUsageHintedThisTurn: boolean }): boolean {
+function maybeSendContextUsageHint(pi: ExtensionAPI, ctx: ExtensionContext, state: HintState): boolean {
 	if (state.contextUsageHintedThisTurn) return false;
 	const percent = contextUsagePercent(ctx);
 	if (percent === undefined || percent < CONTEXT_USAGE_HINT_PERCENT) return false;
 	const rounded = Math.round(percent);
+	if (state.lastContextUsageHintPercent !== undefined && rounded < state.lastContextUsageHintPercent + 5) return false;
 	sendCleanupHint(
 		pi,
 		`pi-forget hint: Context appears to be about ${rounded}% full. This may be a good opportunity to save tokens by replacing stale large tool outputs with detailed summaries using forget({ targets: ["output:<id>"], replacement: <your detailed summary> }).`,
 		{ contextPercent: rounded },
 	);
 	state.contextUsageHintedThisTurn = true;
+	state.lastContextUsageHintPercent = rounded;
 	return true;
 }
 
 function maybeSendLargeOutputHint(
 	pi: ExtensionAPI,
 	ctx: ExtensionContext,
-	state: { hintedOutputEntryIds: Set<string>; hintsThisTurn: number; contextUsageHintedThisTurn: boolean },
+	state: HintState,
 	hint: PendingLargeOutputHint,
 ): boolean {
 	const entry = findToolResultEntry(ctx, hint.toolCallId);
@@ -1033,7 +1042,10 @@ function maybeSendLargeOutputHint(
 	);
 	state.hintedOutputEntryIds.add(entry.id);
 	state.hintsThisTurn++;
-	if (percent !== undefined && percent >= CONTEXT_USAGE_HINT_PERCENT) state.contextUsageHintedThisTurn = true;
+	if (percent !== undefined && percent >= CONTEXT_USAGE_HINT_PERCENT) {
+		state.contextUsageHintedThisTurn = true;
+		state.lastContextUsageHintPercent = Math.max(state.lastContextUsageHintPercent ?? 0, Math.round(percent));
+	}
 	return true;
 }
 
