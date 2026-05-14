@@ -1170,7 +1170,7 @@ export default function piForget(pi: ExtensionAPI) {
 			"Use forget tastefully and considerately: keep recent outputs visible when they are still useful. Avoid needing to re-read relevant info; it is a balance.",
 			"Use forget after large logs, file reads, search results, or skill docs have clearly served their purpose and a summary would preserve the important facts more compactly.",
 			"Prefer forget with output:<id> when only one raw tool output is bulky; this keeps the surrounding conversation intact.",
-			"Use forget with replacements when multiple targets need different summaries in one cleanup pass.",
+			"When forgetting multiple output:<id> targets, prefer forget with replacements unless one shared summary clearly preserves the useful facts from all outputs.",
 			"Use forget with turn:N when a whole completed turn or phase can be represented more compactly as a summary.",
 			"Keep the current/latest turn visible unless the user explicitly asks otherwise.",
 			"Do not use forget as a privacy or secret-removal mechanism; it only moves future work to a cleaned branch.",
