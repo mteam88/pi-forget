@@ -1059,7 +1059,8 @@ export default function piForget(pi: ExtensionAPI) {
 			"Create a synthetic branch where selected visible context is omitted or replaced by summaries. Original session history remains unchanged. This is for context-budget cleanup, not secure deletion.",
 		promptSnippet: "Omit or summarize stale context using turn:N, entry:<id>, or output:<id> targets",
 		promptGuidelines: [
-			"Use forget after large logs, file reads, search results, or skill docs have served their purpose and a summary would preserve the important facts more compactly.",
+			"Use forget tastefully and considerately: keep recent outputs visible when they are still useful. Avoid needing to re-read relevant info; it is a balance.",
+			"Use forget after large logs, file reads, search results, or skill docs have clearly served their purpose and a summary would preserve the important facts more compactly.",
 			"Prefer forget with output:<id> when only one raw tool output is bulky; this keeps the surrounding conversation intact.",
 			"Use forget with replacements when multiple targets need different summaries in one cleanup pass.",
 			"Use forget with turn:N when a whole completed turn or phase can be represented more compactly as a summary.",
