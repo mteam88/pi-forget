@@ -149,6 +149,22 @@ function makeCtx(sm: SessionManager): any {
 
 {
 	const sm = makeSession();
+	sm.appendMessage(user("run command"));
+	const bashId = sm.appendMessage(bash("printf secret", "SECRET OUTPUT"));
+	sm.appendCustomMessageEntry("pi-forget", `pi-forget hint: Large bash output is available as output:${bashId}`, true, {
+		kind: "cleanup_hint",
+		outputTarget: `output:${bashId}`,
+	});
+	sm.appendMessage(user("current"));
+	__test.applyForget(makeCtx(sm), [`output:${bashId}`], "large", "Command output summary");
+	const serializedMessages = JSON.stringify(sm.buildSessionContext().messages);
+	assert.doesNotMatch(serializedMessages, /pi-forget hint: Large bash output/);
+	assert.doesNotMatch(JSON.stringify(sm.getBranch()), /"kind":"cleanup_hint"/);
+	assert.match(serializedMessages, /Command output summary/);
+}
+
+{
+	const sm = makeSession();
 	sm.appendMessage(user("run commands"));
 	const first = sm.appendMessage(bash("printf first", "FIRST RAW"));
 	const second = sm.appendMessage(bash("printf second", "SECOND RAW"));

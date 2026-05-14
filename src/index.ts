@@ -781,7 +781,12 @@ function appendBranchSummary(sm: MutableSessionManager, original: Extract<Sessio
 	});
 }
 
+function isPiForgetCleanupHintEntry(entry: SessionEntry): boolean {
+	return entry.type === "custom_message" && entry.customType === CUSTOM_TYPE && !!entry.details && typeof entry.details === "object" && (entry.details as Record<string, unknown>).kind === "cleanup_hint";
+}
+
 function appendClonedEntry(sm: MutableSessionManager, original: SessionEntry, replacementOutput?: string): string | null {
+	if (isPiForgetCleanupHintEntry(original)) return null;
 	switch (original.type) {
 		case "message":
 			return sm.appendMessage(
