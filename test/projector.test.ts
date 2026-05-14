@@ -99,6 +99,23 @@ function makeCtx(sm: SessionManager): any {
 {
 	const sm = makeSession();
 	sm.appendMessage(user("old"));
+	const bashId = sm.appendMessage(bash("printf big", "PRELUDE OUTPUT"));
+	sm.appendMessage(user("kept turn"));
+	sm.appendMessage(assistant("kept answer"));
+	sm.appendCompaction("summary", bashId, 1000);
+	const ctx = makeCtx(sm);
+
+	const summary = __test.formatContextIndex(ctx, "recent", 12, "summary");
+	assert.match(summary, /prelude  2 entries, 14 output chars/);
+	assert.match(summary, new RegExp(`output:${bashId}  prelude, bashExecution`));
+
+	const outputs = __test.formatContextIndex(ctx, "recent", 12, "outputs");
+	assert.match(outputs, new RegExp(`output:${bashId}  prelude, bashExecution`));
+}
+
+{
+	const sm = makeSession();
+	sm.appendMessage(user("old"));
 	sm.appendMessage(assistant("old answer"));
 	sm.appendMessage(user("current"));
 	const result = __test.applyForget(makeCtx(sm), ["turn:1"], "obsolete", "[summary: old work completed]");
@@ -128,6 +145,24 @@ function makeCtx(sm: SessionManager): any {
 	const serialized = JSON.stringify(sm.buildSessionContext().messages);
 	assert.doesNotMatch(serialized, /SECRET OUTPUT/);
 	assert.match(serialized, new RegExp(`\\[output forgotten by pi-forget: ${bashId}\\]`));
+}
+
+{
+	const sm = makeSession();
+	sm.appendMessage(user("run commands"));
+	const first = sm.appendMessage(bash("printf first", "FIRST RAW"));
+	const second = sm.appendMessage(bash("printf second", "SECOND RAW"));
+	sm.appendMessage(user("current"));
+	const result = __test.applyForget(makeCtx(sm), [`output:${first}`, `output:${second}`], "large", undefined, {
+		[`output:${first}`]: "First output summary",
+		[second]: "Second output summary",
+	});
+	assert.match(result.text, new RegExp(`output:${first}`));
+	const serialized = JSON.stringify(sm.buildSessionContext().messages);
+	assert.doesNotMatch(serialized, /FIRST RAW/);
+	assert.doesNotMatch(serialized, /SECOND RAW/);
+	assert.match(serialized, /First output summary/);
+	assert.match(serialized, /Second output summary/);
 }
 
 {

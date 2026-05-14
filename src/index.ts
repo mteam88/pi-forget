@@ -15,6 +15,9 @@ const SUMMARY_SNIPPET_CHARS = 90;
 const DEFAULT_SUGGESTION_LIMIT = 8;
 const DEFAULT_OUTPUT_LIMIT = 20;
 const MAX_OUTPUT_LIMIT = 100;
+const LARGE_OUTPUT_HINT_CHARS = 8_000;
+const MAX_LARGE_OUTPUT_HINTS_PER_TURN = 3;
+const CONTEXT_USAGE_HINT_PERCENT = 80;
 const CUSTOM_TYPE = "pi-forget";
 
 type ListContextDetail = "summary" | "entries" | "outputs";
@@ -43,6 +46,7 @@ interface RewritePlan {
 	targets: string[];
 	reason?: string;
 	replacement?: string;
+	replacements?: Record<string, string>;
 	originalLeafId: string | null;
 	firstChangedIndex: number;
 	insertBefore: Map<string, string[]>;
@@ -54,6 +58,12 @@ interface RewritePlan {
 interface ApplyForgetResult {
 	text: string;
 	details: Record<string, unknown>;
+}
+
+interface PendingLargeOutputHint {
+	toolCallId: string;
+	toolName: string;
+	chars: number;
 }
 
 type MessageRecord = Record<string, unknown> & { role?: string };
@@ -347,16 +357,28 @@ function getOutputCandidates(items: ContextItem[], options: OutputSearchOptions 
 		.slice(0, Math.max(1, Math.min(MAX_OUTPUT_LIMIT, Math.floor(options.maxOutputs ?? MAX_OUTPUT_LIMIT))));
 }
 
-function formatOutputCandidate(candidate: { item: ContextItem; output: string }): string {
+function formatOutputCandidate(candidate: { item: ContextItem; output: string }, source?: string): string {
 	const msg = messageRecord(candidate.item.message);
 	const kind = msg.role === "toolResult" ? `tool ${stringField(msg, "toolName") || "tool"}` : msg.role ?? "message";
-	return `output:${candidate.item.entryId}  ${kind}, ${candidate.output.length} chars, "${compactText(candidate.output, SUMMARY_SNIPPET_CHARS)}"`;
+	const sourcePrefix = source ? `${source}, ` : "";
+	return `output:${candidate.item.entryId}  ${sourcePrefix}${kind}, ${candidate.output.length} chars, "${compactText(candidate.output, SUMMARY_SNIPPET_CHARS)}"`;
 }
 
 function formatForgetSnippet(candidates: Array<{ item: ContextItem; output: string }>): string | undefined {
 	if (!candidates.length) return undefined;
 	const targets = candidates.map((candidate) => `"output:${candidate.item.entryId}"`).join(", ");
 	return `forget({ targets: [${targets}], reason: "trim stale bulky outputs" })`;
+}
+
+function sourceLabels(prelude: ContextItem[], turns: Turn[], includePrelude: boolean): Map<string, string> {
+	const labels = new Map<string, string>();
+	if (includePrelude) {
+		for (const item of prelude) labels.set(item.entryId, "prelude");
+	}
+	for (const turn of turns) {
+		for (const item of turn.items) labels.set(item.entryId, `turn:${turn.number}`);
+	}
+	return labels;
 }
 
 function formatProjectedContext(
@@ -384,27 +406,36 @@ function formatProjectedContext(
 		lines.push("");
 	}
 
-	if (!selectedTurns.length) {
+	if (!selectedTurns.length && !(turnNumber === undefined && prelude.length)) {
 		lines.push("No visible turns.");
 		return lines.join("\n");
 	}
 
+	const includePreludeOutputs = turnNumber === undefined;
+	const outputItems = [...(includePreludeOutputs ? prelude : []), ...selectedTurns.flatMap((turn) => turn.items)];
+	const labels = sourceLabels(prelude, selectedTurns, includePreludeOutputs);
+
 	if (detail === "summary") {
+		if (includePreludeOutputs && prelude.length) {
+			const preludeOutputChars = countOutputChars(prelude);
+			const suffix = preludeOutputChars > 0 ? `, ${preludeOutputChars} output chars` : "";
+			lines.push(`prelude  ${prelude.length} entries${suffix}`);
+		}
 		for (const turn of selectedTurns) lines.push(formatTurnSummary(turn));
-		const candidates = getOutputCandidates(selectedTurns.flatMap((turn) => turn.items), {
+		const candidates = getOutputCandidates(outputItems, {
 			...outputOptions,
 			maxOutputs: Math.min(outputOptions.maxOutputs ?? DEFAULT_SUGGESTION_LIMIT, DEFAULT_SUGGESTION_LIMIT),
 		});
 		if (candidates.length) {
 			lines.push("", "Largest forgettable outputs:");
-			for (const candidate of candidates) lines.push(`  ${formatOutputCandidate(candidate)}`);
+			for (const candidate of candidates) lines.push(`  ${formatOutputCandidate(candidate, labels.get(candidate.item.entryId))}`);
 		}
 	} else if (detail === "outputs") {
-		const candidates = getOutputCandidates(selectedTurns.flatMap((turn) => turn.items), outputOptions);
+		const candidates = getOutputCandidates(outputItems, outputOptions);
 		if (!candidates.length) {
-			lines.push("No forgettable outputs in selected turns.");
+			lines.push("No forgettable outputs in selected context.");
 		} else {
-			for (const candidate of candidates) lines.push(formatOutputCandidate(candidate));
+			for (const candidate of candidates) lines.push(formatOutputCandidate(candidate, labels.get(candidate.item.entryId)));
 			const snippet = formatForgetSnippet(candidates);
 			if (snippet) lines.push("", "Apply with:", snippet);
 		}
@@ -454,6 +485,24 @@ function replacementFor(kind: RewriteKind, label: string, replacement?: string):
 	}
 }
 
+function replacementOverride(replacements: Record<string, string> | undefined, aliases: string[]): string | undefined {
+	if (!replacements) return undefined;
+	for (const alias of aliases) {
+		if (Object.hasOwn(replacements, alias)) return replacements[alias];
+	}
+	return undefined;
+}
+
+function replacementForTarget(
+	kind: RewriteKind,
+	label: string,
+	aliases: string[],
+	replacement?: string,
+	replacements?: Record<string, string>,
+): string {
+	return replacementFor(kind, label, replacementOverride(replacements, aliases) ?? replacement);
+}
+
 function branchIndexById(branch: SessionEntry[]): Map<string, number> {
 	const indexes = new Map<string, number>();
 	branch.forEach((entry, index) => indexes.set(entry.id, index));
@@ -468,7 +517,13 @@ function existingPiForgetCount(branch: SessionEntry[]): number {
 	return branch.filter((entry) => entry.type === "custom" && entry.customType === CUSTOM_TYPE).length;
 }
 
-function buildForgetPlan(ctx: ExtensionContext, targets: string[], reason?: string, replacement?: string): { plan?: RewritePlan; error?: ApplyForgetResult } {
+function buildForgetPlan(
+	ctx: ExtensionContext,
+	targets: string[],
+	reason?: string,
+	replacement?: string,
+	replacements?: Record<string, string>,
+): { plan?: RewritePlan; error?: ApplyForgetResult } {
 	const projection = projectContext(ctx);
 	const { branch, items } = projection;
 	const { turns } = groupTurns(items);
@@ -479,6 +534,7 @@ function buildForgetPlan(ctx: ExtensionContext, targets: string[], reason?: stri
 		targets,
 		reason,
 		replacement,
+		replacements,
 		originalLeafId: ctx.sessionManager.getLeafId(),
 		firstChangedIndex: Number.POSITIVE_INFINITY,
 		insertBefore: new Map(),
@@ -502,6 +558,7 @@ function buildForgetPlan(ctx: ExtensionContext, targets: string[], reason?: stri
 	for (const target of targets) {
 		const turnNumber = parseTurnTarget(target);
 		if (turnNumber !== undefined) {
+			const canonicalTarget = `turn:${turnNumber}`;
 			const turn = turns.find((candidate) => candidate.number === turnNumber);
 			if (!turn) return { error: { text: `Unknown ${target}. Run list_context for current turn numbers.`, details: { error: "unknown_turn", target } } };
 			if (turnNumber === latestTurn) {
@@ -510,7 +567,7 @@ function buildForgetPlan(ctx: ExtensionContext, targets: string[], reason?: stri
 			const ids = turn.items.flatMap(sourceEntryIds);
 			const first = ids[0];
 			if (!first) return { error: { text: `Could not resolve ${target} to source entries.`, details: { error: "unresolved_turn", target } } };
-			addInsertBefore(first, replacementFor("turn", target, replacement));
+			addInsertBefore(first, replacementForTarget("turn", canonicalTarget, [target, canonicalTarget], replacement, replacements));
 			for (const id of ids) {
 				plan.dropEntryIds.add(id);
 				markChanged(id);
@@ -520,20 +577,22 @@ function buildForgetPlan(ctx: ExtensionContext, targets: string[], reason?: stri
 
 		const outputEntryId = parseOutputTarget(target);
 		if (outputEntryId !== undefined) {
+			const canonicalTarget = `output:${outputEntryId}`;
 			const item = items.find((candidate) => (candidate.entryId === outputEntryId || candidate.sourceEntryIds.includes(outputEntryId)) && outputSurfaceText(candidate) !== undefined);
 			if (!item) return { error: { text: `Unknown output entry ${outputEntryId}, or entry has no separable output.`, details: { error: "unknown_output", target } } };
 			const rewriteEntryId = sourceEntryIds(item).find((id) => id === outputEntryId) ?? item.entryId;
-			plan.redactOutput.set(rewriteEntryId, replacementFor("output", outputEntryId, replacement));
+			plan.redactOutput.set(rewriteEntryId, replacementForTarget("output", outputEntryId, [target, canonicalTarget, outputEntryId], replacement, replacements));
 			markChanged(rewriteEntryId);
 			continue;
 		}
 
 		const entryId = parseEntryTarget(target);
 		if (entryId !== undefined) {
+			const canonicalTarget = `entry:${entryId}`;
 			const item = items.find((candidate) => candidate.entryId === entryId || candidate.sourceEntryIds.includes(entryId));
 			if (!item) return { error: { text: `Unknown entry ${entryId}. Run list_context for current visible entries.`, details: { error: "unknown_entry", target } } };
 			const rewriteEntryId = sourceEntryIds(item).find((id) => id === entryId) ?? item.entryId;
-			plan.replaceEntry.set(rewriteEntryId, replacementFor("entry", entryId, replacement));
+			plan.replaceEntry.set(rewriteEntryId, replacementForTarget("entry", entryId, [target, canonicalTarget, entryId], replacement, replacements));
 			markChanged(rewriteEntryId);
 			continue;
 		}
@@ -613,6 +672,7 @@ function appendMetadata(sm: MutableSessionManager, plan: RewritePlan, rewrittenF
 		targets: plan.targets,
 		reason: plan.reason,
 		replacement: plan.replacement,
+		replacements: plan.replacements,
 		originalLeafId: plan.originalLeafId,
 		rewrittenFromId,
 		createdAt: Date.now(),
@@ -653,8 +713,8 @@ function applyForgetPlan(ctx: ExtensionContext, plan: RewritePlan): ApplyForgetR
 	};
 }
 
-function applyForget(ctx: ExtensionContext, targets: string[], reason?: string, replacement?: string): ApplyForgetResult {
-	const { plan, error } = buildForgetPlan(ctx, targets, reason, replacement);
+function applyForget(ctx: ExtensionContext, targets: string[], reason?: string, replacement?: string, replacements?: Record<string, string>): ApplyForgetResult {
+	const { plan, error } = buildForgetPlan(ctx, targets, reason, replacement, replacements);
 	if (error) return error;
 	if (!plan) return { text: "No changes to apply.", details: { error: "empty_plan" } };
 	return applyForgetPlan(ctx, plan);
@@ -734,8 +794,81 @@ async function unforget(ctx: ExtensionCommandContext, forgetId: string): Promise
 	return `Returned to original branch for ${forgetId}.`;
 }
 
+function findToolResultEntry(ctx: ExtensionContext, toolCallId: string): Extract<SessionEntry, { type: "message" }> | undefined {
+	const branch = ctx.sessionManager.getBranch();
+	for (let i = branch.length - 1; i >= 0; i--) {
+		const entry = branch[i];
+		if (entry.type !== "message") continue;
+		const msg = messageRecord(entry.message);
+		if (msg.role === "toolResult" && msg.toolCallId === toolCallId) return entry;
+	}
+	return undefined;
+}
+
+function contextUsagePercent(ctx: ExtensionContext): number | undefined {
+	const usage = ctx.getContextUsage();
+	if (!usage || usage.percent === null) return undefined;
+	return usage.percent <= 1 ? usage.percent * 100 : usage.percent;
+}
+
+function sendCleanupHint(pi: ExtensionAPI, content: string, details: Record<string, unknown>): void {
+	pi.sendMessage(
+		{
+			customType: CUSTOM_TYPE,
+			content,
+			display: true,
+			details: { kind: "cleanup_hint", ...details },
+		},
+		{ deliverAs: "steer" },
+	);
+}
+
+function maybeSendContextUsageHint(pi: ExtensionAPI, ctx: ExtensionContext, state: { contextUsageHintedThisTurn: boolean }): boolean {
+	if (state.contextUsageHintedThisTurn) return false;
+	const percent = contextUsagePercent(ctx);
+	if (percent === undefined || percent < CONTEXT_USAGE_HINT_PERCENT) return false;
+	const rounded = Math.round(percent);
+	sendCleanupHint(
+		pi,
+		`pi-forget hint: Context appears to be about ${rounded}% full. This may be a good opportunity to save tokens by replacing stale large tool outputs with detailed summaries, for example: forget({ targets: ["output:<id>"], replacement: "..." }).`,
+		{ contextPercent: rounded },
+	);
+	state.contextUsageHintedThisTurn = true;
+	return true;
+}
+
+function maybeSendLargeOutputHint(
+	pi: ExtensionAPI,
+	ctx: ExtensionContext,
+	state: { hintedOutputEntryIds: Set<string>; hintsThisTurn: number; contextUsageHintedThisTurn: boolean },
+	hint: PendingLargeOutputHint,
+): boolean {
+	const entry = findToolResultEntry(ctx, hint.toolCallId);
+	if (!entry || state.hintedOutputEntryIds.has(entry.id) || state.hintsThisTurn >= MAX_LARGE_OUTPUT_HINTS_PER_TURN) return false;
+	const target = `output:${entry.id}`;
+	const percent = contextUsagePercent(ctx);
+	const contextSentence = percent !== undefined && percent >= CONTEXT_USAGE_HINT_PERCENT
+		? ` Context appears to be about ${Math.round(percent)}% full, so summarizing stale large outputs may be especially useful.`
+		: "";
+	sendCleanupHint(
+		pi,
+		`pi-forget hint: Large ${hint.toolName} output is available as ${target} (${hint.chars} chars). After extracting the useful facts, this may be a good opportunity to save tokens by replacing the raw output with a detailed summary: forget({ targets: ["${target}"], replacement: "..." }).${contextSentence}`,
+		{ outputTarget: target, toolName: hint.toolName, chars: hint.chars, contextPercent: percent === undefined ? undefined : Math.round(percent) },
+	);
+	state.hintedOutputEntryIds.add(entry.id);
+	state.hintsThisTurn++;
+	if (percent !== undefined && percent >= CONTEXT_USAGE_HINT_PERCENT) state.contextUsageHintedThisTurn = true;
+	return true;
+}
+
 export default function piForget(pi: ExtensionAPI) {
 	const pendingVisibleLabels = new Set<string>();
+	const pendingLargeOutputHints = new Map<string, PendingLargeOutputHint>();
+	const hintState = {
+		hintedOutputEntryIds: new Set<string>(),
+		hintsThisTurn: 0,
+		contextUsageHintedThisTurn: false,
+	};
 
 	pi.on("context", async (event, ctx) => {
 		if (getPiForgetMetadata(ctx.sessionManager.getBranch()).length === 0) return;
@@ -743,19 +876,43 @@ export default function piForget(pi: ExtensionAPI) {
 		return { messages: appendVolatileMessageSuffix(projected, event.messages) };
 	});
 
+	pi.on("turn_start", async () => {
+		hintState.hintsThisTurn = 0;
+		hintState.contextUsageHintedThisTurn = false;
+	});
+
+	pi.on("message_end", async (event, ctx) => {
+		const msg = messageRecord(event.message);
+		if (msg.role !== "toolResult") return;
+		const toolCallId = stringField(msg, "toolCallId");
+		if (!toolCallId) return;
+		const toolName = stringField(msg, "toolName") || "tool";
+		const chars = contentText(msg.content).length;
+		if (chars >= LARGE_OUTPUT_HINT_CHARS) {
+			const hint = { toolCallId, toolName, chars };
+			if (!maybeSendLargeOutputHint(pi, ctx, hintState, hint)) pendingLargeOutputHints.set(toolCallId, hint);
+		} else {
+			maybeSendContextUsageHint(pi, ctx, hintState);
+		}
+	});
+
 	pi.on("turn_end", async (_event, ctx) => {
+		for (const [toolCallId, hint] of pendingLargeOutputHints) {
+			if (maybeSendLargeOutputHint(pi, ctx, hintState, hint)) pendingLargeOutputHints.delete(toolCallId);
+		}
+		maybeSendContextUsageHint(pi, ctx, hintState);
 		labelVisibleForgetToolResults(pi, ctx, pendingVisibleLabels);
 	});
 
 	pi.registerTool({
 		name: "list_context",
 		label: "List Context",
-		description: "List provider-visible context turns with stable turn numbers for the forget tool.",
-		promptSnippet: "List provider-visible context turns and output targets that can be passed to forget",
+		description: "Inspect provider-visible context and find stable turn:N, entry:<id>, and output:<id> targets for forget.",
+		promptSnippet: "Inspect visible context and find forget targets",
 		promptGuidelines: [
-			"Use list_context before forget when asked to trim, clean up, or forget stale context.",
-			"For routine cleanup, first call list_context({detail:\"summary\"}). If output chars are high, call list_context({detail:\"outputs\", minChars:2000, maxOutputs:12, excludeLatestTurns:1}) and pass the generated output:<id> targets to forget.",
-			"Use detail:\"entries\" with turn:N when deciding whether a whole completed turn can be summarized and forgotten.",
+			"Use list_context to discover cleanup targets when stale context or large outputs are making the session harder to work with.",
+			"Use list_context with detail:\"outputs\" to find large raw outputs, including prelude outputs left visible by compaction or split turns.",
+			"Use list_context with detail:\"entries\" and turn:N when deciding whether a completed turn or phase should be summarized.",
 		],
 		parameters: Type.Object({
 			scope: Type.Optional(Type.Union([Type.Literal("recent"), Type.Literal("all")], { default: "recent" })),
@@ -791,29 +948,39 @@ export default function piForget(pi: ExtensionAPI) {
 		name: "forget",
 		label: "Forget",
 		description:
-			"Create a synthetic session branch that omits stale provider-visible turns/specific entries, or redacts bulky tool output while preserving the original history on the old branch. This is for context-budget cleanup, not security: it does not delete session history, scrub logs, or safely handle leaked secrets/tokens.",
-		promptSnippet: "Forget stale context by creating a synthetic branch from turn:N, entry:<id>, or output:<id> targets from list_context",
+			"Create a synthetic branch where selected visible context is omitted or replaced by summaries. Original session history remains unchanged. This is for context-budget cleanup, not secure deletion.",
+		promptSnippet: "Omit or summarize stale context using turn:N, entry:<id>, or output:<id> targets",
 		promptGuidelines: [
-			"Use forget with turn:N, entry:<id>, or output:<id> targets returned by list_context.",
-			"Prefer output:<id> for bulky tool/read/bash/list_context output so useful surrounding conversation stays visible in the synthetic branch.",
-			"Prefer turn:N with replacement for completed stale work that can be collapsed into a summary.",
-			"Do not forget the current/latest turn; keep the active user request and current work visible.",
-			"Do not use forget as a security/privacy mechanism for sensitive tokens, credentials, or secrets. It only moves future work to a cleaned branch; it does not erase the append-only session history or other copies.",
+			"Use forget after large logs, file reads, search results, or skill docs have served their purpose and a summary would preserve the important facts more compactly.",
+			"Prefer forget with output:<id> when only one raw tool output is bulky; this keeps the surrounding conversation intact.",
+			"Use forget with replacements when multiple targets need different summaries in one cleanup pass.",
+			"Use forget with turn:N when a whole completed turn or phase can be represented more compactly as a summary.",
+			"Keep the current/latest turn visible unless the user explicitly asks otherwise.",
+			"Do not use forget as a privacy or secret-removal mechanism; it only moves future work to a cleaned branch.",
 		],
 		parameters: Type.Object({
-			targets: Type.Array(Type.String({ description: "Targets to forget: turn:N, entry:<id>, or output:<id>." }), {
+			targets: Type.Array(Type.String({ description: "Targets to forget or summarize: turn:N, entry:<id>, or output:<id>." }), {
 				minItems: 1,
 			}),
-			reason: Type.Optional(Type.String({ description: "Why this context should be omitted." })),
+			reason: Type.Optional(Type.String({ description: "Why this context should be omitted or summarized." })),
 			replacement: Type.Optional(
 				Type.String({
 					description:
-						"Optional replacement/summary text to show in the synthetic branch instead of the default pi-forget placeholder. For multiple targets, the same replacement is applied to each target.",
+						"Optional replacement/summary text to show in the synthetic branch instead of the default pi-forget placeholder. For multiple targets, the same replacement is applied to each target unless replacements provides a per-target override.",
 				}),
+			),
+			replacements: Type.Optional(
+				Type.Record(
+					Type.String(),
+					Type.String({
+						description:
+							"Optional per-target replacement summaries. Keys are target strings such as output:abc12345, entry:abc12345, turn:2, or bare entry ids. Values replace only that target and override replacement.",
+					}),
+				),
 			),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const result = applyForget(ctx, params.targets, params.reason, params.replacement);
+			const result = applyForget(ctx, params.targets, params.reason, params.replacement, params.replacements);
 			if (typeof result.details.rewrittenLeafId === "string") {
 				labelSyntheticBranch(pi, ctx, result);
 				if (typeof result.details.forgetId === "string") pendingVisibleLabels.add(result.details.forgetId);

@@ -31,7 +31,9 @@ For routine cleanup, start with the default summary. If output chars are high, s
 list_context({ detail: "outputs", minChars: 2000, maxOutputs: 12, excludeLatestTurns: 1 })
 ```
 
-Use `detail:"entries"` with `turn:N` to expand one turn, or `detail:"outputs"` to search output redaction targets. Output search supports `minChars`, `maxOutputs`, `query`, and `excludeLatestTurns`, and prints a ready-to-run `forget({ targets: [...] })` snippet.
+Use `detail:"entries"` with `turn:N` to expand one turn, or `detail:"outputs"` to search output redaction targets. Output search supports `minChars`, `maxOutputs`, `query`, and `excludeLatestTurns`, includes prelude outputs left visible by compaction/split turns, and prints a ready-to-run `forget({ targets: [...] })` snippet.
+
+When a tool result is large, pi-forget may also inject a small provider-visible hint with the exact `output:<id>` target so the model can summarize it without first calling `list_context`.
 
 ### `forget`
 
@@ -65,7 +67,19 @@ Redact only a tool output while preserving the surrounding tool context:
 forget({ targets: ["output:fde92dfa"], reason: "huge command output" })
 ```
 
-`output:<id>` applies to `toolResult` and `bashExecution` entries. `replacement` is optional for any target and is useful when collapsing a turn into a concise summary. The original session entries remain unchanged; `pi-forget` creates a synthetic branch containing cloned kept entries plus `pi-forget` replacement/metadata entries.
+`output:<id>` applies to `toolResult` and `bashExecution` entries. `replacement` is optional for any target and is useful when replacing a large raw output with a detailed summary. For multiple targets, use `replacements` for per-target summaries:
+
+```ts
+forget({
+  targets: ["output:aaaa1111", "output:bbbb2222"],
+  replacements: {
+    "output:aaaa1111": "Summary of first large output...",
+    "output:bbbb2222": "Summary of second large output..."
+  }
+})
+```
+
+The original session entries remain unchanged; `pi-forget` creates a synthetic branch containing cloned kept entries plus `pi-forget` replacement/metadata entries.
 
 Do not use `forget` to handle sensitive tokens, credentials, or secrets. Rotate/revoke secrets and clean the underlying storage/logs instead.
 
