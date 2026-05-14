@@ -446,7 +446,6 @@ function pushGroupedOutputCandidates(
 	}
 	for (const turn of turns) {
 		const turnCandidates = turn.items.map((item) => byEntryId.get(item.entryId)).filter((candidate): candidate is { item: ContextItem; output: string } => candidate !== undefined);
-		if (!turnCandidates.length) continue;
 		lines.push(formatTurnSummary(turn));
 		for (const candidate of turnCandidates) lines.push(`  ${formatOutputCandidate(candidate)}`);
 	}
@@ -512,8 +511,12 @@ function formatProjectedContext(
 		const candidates = getOutputCandidates(outputItems, outputOptions);
 		if (!candidates.length) {
 			lines.push("No output targets found in selected context.");
+			if (outputTurns.length) {
+				lines.push("", "Turn token overview:");
+				for (const turn of outputTurns) lines.push(formatTurnSummary(turn));
+			}
 		} else {
-			lines.push("Large output targets, grouped by where they appear in the conversation:", "");
+			lines.push("Output targets grouped by where they appear in the conversation:", "");
 			pushGroupedOutputCandidates(lines, candidates, prelude, outputTurns, includePreludeOutputs);
 		}
 	} else {

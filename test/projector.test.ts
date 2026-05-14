@@ -87,7 +87,7 @@ function makeCtx(sm: SessionManager): any {
 	assert.match(entries, /bashExecution .*:/);
 
 	const outputs = __test.formatContextIndex(ctx, "recent", 12, "outputs", 1);
-	assert.match(outputs, /Large output targets, grouped by where they appear in the conversation:/);
+	assert.match(outputs, /Output targets grouped by where they appear in the conversation:/);
 	assert.match(outputs, new RegExp(`output:${bashId}`));
 	assert.match(outputs, /turn:1  user/);
 
