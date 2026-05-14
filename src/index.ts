@@ -9,7 +9,7 @@ import type {
 import { Type } from "typebox";
 
 const MAX_LIST_LIMIT = 50;
-const DEFAULT_LIST_LIMIT = 12;
+const DEFAULT_LIST_LIMIT = MAX_LIST_LIMIT;
 const SNIPPET_CHARS = 180;
 const SUMMARY_SNIPPET_CHARS = 90;
 const DEFAULT_SUGGESTION_LIMIT = 8;
@@ -372,8 +372,13 @@ function formatOutputCandidate(candidate: { item: ContextItem; output: string },
 
 function formatForgetSnippet(candidates: Array<{ item: ContextItem; output: string }>): string | undefined {
 	if (!candidates.length) return undefined;
-	const targets = candidates.map((candidate) => `"output:${candidate.item.entryId}"`).join(", ");
-	return `forget({ targets: [${targets}], reason: "trim stale bulky outputs" })`;
+	const targets = candidates.map((candidate) => `"output:${candidate.item.entryId}"`);
+	const summaryPrompt = "Detailed summary preserving key findings, errors, commands/files, conclusions, and remaining uncertainty.";
+	if (targets.length === 1) {
+		return `forget({ targets: [${targets[0]}], reason: "summarize stale bulky output", replacement: "${summaryPrompt}" })`;
+	}
+	const replacements = candidates.map((candidate) => `    "output:${candidate.item.entryId}": "${summaryPrompt}"`).join(",\n");
+	return `forget({\n  targets: [${targets.join(", ")}],\n  reason: "summarize stale bulky outputs",\n  replacements: {\n${replacements}\n  }\n})`;
 }
 
 function sourceLabels(prelude: ContextItem[], turns: Turn[], includePrelude: boolean): Map<string, string> {
@@ -418,8 +423,11 @@ function formatProjectedContext(
 	}
 
 	const includePreludeOutputs = turnNumber === undefined;
-	const outputItems = [...(includePreludeOutputs ? prelude : []), ...selectedTurns.flatMap((turn) => turn.items)];
-	const labels = sourceLabels(prelude, selectedTurns, includePreludeOutputs);
+	const outputTurns = detail === "outputs" && turnNumber === undefined
+		? turns.filter((turn) => turn.number <= excludedStart)
+		: selectedTurns;
+	const outputItems = [...(includePreludeOutputs ? prelude : []), ...outputTurns.flatMap((turn) => turn.items)];
+	const labels = sourceLabels(prelude, outputTurns, includePreludeOutputs);
 
 	if (detail === "summary") {
 		if (includePreludeOutputs && prelude.length) {
@@ -918,7 +926,7 @@ function maybeSendContextUsageHint(pi: ExtensionAPI, ctx: ExtensionContext, stat
 	const rounded = Math.round(percent);
 	sendCleanupHint(
 		pi,
-		`pi-forget hint: Context appears to be about ${rounded}% full. This may be a good opportunity to save tokens by replacing stale large tool outputs with detailed summaries, for example: forget({ targets: ["output:<id>"], replacement: "..." }).`,
+		`pi-forget hint: Context appears to be about ${rounded}% full. This may be a good opportunity to save tokens by replacing stale large tool outputs with detailed summaries, for example: forget({ targets: ["output:<id>"], replacement: "Detailed summary preserving key findings, errors, commands/files, conclusions, and remaining uncertainty." }).`,
 		{ contextPercent: rounded },
 	);
 	state.contextUsageHintedThisTurn = true;
@@ -940,7 +948,7 @@ function maybeSendLargeOutputHint(
 		: "";
 	sendCleanupHint(
 		pi,
-		`pi-forget hint: Large ${hint.toolName} output is available as ${target} (${hint.chars} chars). After extracting the useful facts, this may be a good opportunity to save tokens by replacing the raw output with a detailed summary: forget({ targets: ["${target}"], replacement: "..." }).${contextSentence}`,
+		`pi-forget hint: Large ${hint.toolName} output is available as ${target} (${hint.chars} chars). After extracting the useful facts, this may be a good opportunity to save tokens by replacing the raw output with a detailed summary: forget({ targets: ["${target}"], replacement: "Detailed summary preserving key findings, errors, commands/files, conclusions, and remaining uncertainty." }).${contextSentence}`,
 		{ outputTarget: target, toolName: hint.toolName, chars: hint.chars, contextPercent: percent === undefined ? undefined : Math.round(percent) },
 	);
 	state.hintedOutputEntryIds.add(entry.id);
@@ -1003,7 +1011,7 @@ export default function piForget(pi: ExtensionAPI) {
 			"Use list_context with detail:\"entries\" and turn:N when deciding whether a completed turn or phase should be summarized.",
 		],
 		parameters: Type.Object({
-			scope: Type.Optional(Type.Union([Type.Literal("recent"), Type.Literal("all")], { default: "recent" })),
+			scope: Type.Optional(Type.Union([Type.Literal("recent"), Type.Literal("all")], { default: "all" })),
 			limit: Type.Optional(Type.Number({ minimum: 1, maximum: MAX_LIST_LIMIT, default: DEFAULT_LIST_LIMIT })),
 			detail: Type.Optional(
 				Type.Union([Type.Literal("summary"), Type.Literal("entries"), Type.Literal("outputs")], { default: "summary" }),
@@ -1015,7 +1023,7 @@ export default function piForget(pi: ExtensionAPI) {
 			excludeLatestTurns: Type.Optional(Type.Number({ minimum: 0, description: "Exclude the latest N turns from output search results." })),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const scope = params.scope ?? "recent";
+			const scope = params.scope ?? "all";
 			const detail = params.detail ?? "summary";
 			const limit = Math.min(MAX_LIST_LIMIT, Math.max(1, Math.floor(params.limit ?? DEFAULT_LIST_LIMIT)));
 			const turn = params.turn === undefined ? undefined : Math.max(1, Math.floor(params.turn));
