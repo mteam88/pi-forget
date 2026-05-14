@@ -70,6 +70,8 @@ interface PendingLargeOutputHint {
 	toolCallId: string;
 	toolName: string;
 	chars: number;
+	callDescription?: string;
+	outputPreview?: string;
 }
 
 type MessageRecord = Record<string, unknown> & { role?: string };
@@ -225,6 +227,18 @@ function compactText(text: string, limit = SNIPPET_CHARS): string {
 	const normalized = text.replace(/\s+/g, " ").trim();
 	if (normalized.length <= limit) return normalized;
 	return `${normalized.slice(0, Math.max(0, limit - 1))}…`;
+}
+
+function compactJson(value: unknown, limit = SNIPPET_CHARS): string {
+	try {
+		return compactText(JSON.stringify(value), limit);
+	} catch {
+		return compactText(String(value), limit);
+	}
+}
+
+function approxTokens(chars: number): number {
+	return Math.max(1, Math.round(chars / 4));
 }
 
 function asContentBlocks(content: unknown): ContentBlock[] {
@@ -782,6 +796,16 @@ function appendMetadata(sm: MutableSessionManager, plan: RewritePlan, rewrittenF
 	});
 }
 
+function submittedReplacementText(plan: RewritePlan): string {
+	const sections: string[] = [];
+	if (plan.replacement !== undefined) sections.push(`Replacement text:\n${plan.replacement}`);
+	if (plan.replacements && Object.keys(plan.replacements).length > 0) {
+		const lines = Object.entries(plan.replacements).flatMap(([target, replacement]) => [`${target}:`, replacement]);
+		sections.push(`Replacement texts:\n${lines.join("\n")}`);
+	}
+	return sections.length ? `\n\n${sections.join("\n\n")}` : "";
+}
+
 function applyForgetPlan(ctx: ExtensionContext, plan: RewritePlan): ApplyForgetResult {
 	const sm = sessionManager(ctx);
 	const branch = ctx.sessionManager.getBranch();
@@ -816,7 +840,7 @@ function applyForgetPlan(ctx: ExtensionContext, plan: RewritePlan): ApplyForgetR
 	const syntheticLeafId = appendMetadata(sm, plan, rewrittenContentLeafId, aliases);
 
 	return {
-		text: `Created synthetic pi-forget branch ${plan.id} for ${plan.targets.join(", ")}. Original session history is unchanged. Use /unforget ${plan.id} to return to the original branch.`,
+		text: `Created synthetic pi-forget branch ${plan.id} for ${plan.targets.join(", ")}. Original session history is unchanged. Use /unforget ${plan.id} to return to the original branch.${submittedReplacementText(plan)}`,
 		details: { forgetId: plan.id, targets: plan.targets, originalLeafId: plan.originalLeafId, rewrittenLeafId: syntheticLeafId, rewrittenContentLeafId, appended },
 	};
 }
@@ -913,6 +937,22 @@ function findToolResultEntry(ctx: ExtensionContext, toolCallId: string): Extract
 	return undefined;
 }
 
+function findToolCallDescription(ctx: ExtensionContext, toolCallId: string): string | undefined {
+	const branch = ctx.sessionManager.getBranch();
+	for (let i = branch.length - 1; i >= 0; i--) {
+		const entry = branch[i];
+		if (entry.type !== "message") continue;
+		const msg = messageRecord(entry.message);
+		if (msg.role !== "assistant") continue;
+		for (const block of asContentBlocks(msg.content)) {
+			if (block.type !== "toolCall" || block.id !== toolCallId) continue;
+			const name = typeof block.name === "string" && block.name ? block.name : "tool";
+			return `${name}(${compactJson(block.arguments ?? {}, 260)})`;
+		}
+	}
+	return undefined;
+}
+
 function contextUsagePercent(ctx: ExtensionContext): number | undefined {
 	const usage = ctx.getContextUsage();
 	if (!usage || usage.percent === null) return undefined;
@@ -958,10 +998,12 @@ function maybeSendLargeOutputHint(
 	const contextSentence = percent !== undefined && percent >= CONTEXT_USAGE_HINT_PERCENT
 		? ` Context appears to be about ${Math.round(percent)}% full, so summarizing stale large outputs may be especially useful.`
 		: "";
+	const callSentence = hint.callDescription ? ` It came from: ${hint.callDescription}.` : "";
+	const previewSentence = hint.outputPreview ? ` Output starts: "${hint.outputPreview}".` : "";
 	sendCleanupHint(
 		pi,
-		`pi-forget hint: Large ${hint.toolName} output is available as ${target} (${hint.chars} chars). After extracting the useful facts, this may be a good opportunity to save tokens by replacing the raw output with a detailed summary: forget({ targets: ["${target}"], replacement: "Detailed summary preserving key findings, errors, commands/files, conclusions, and remaining uncertainty." }).${contextSentence}`,
-		{ outputTarget: target, toolName: hint.toolName, chars: hint.chars, contextPercent: percent === undefined ? undefined : Math.round(percent) },
+		`pi-forget hint: Large ${hint.toolName} output ${target} is ${hint.chars} chars (~${approxTokens(hint.chars)} tokens).${callSentence}${previewSentence} After extracting the useful facts, this may be a good opportunity to save tokens by replacing the raw output with a detailed summary: forget({ targets: ["${target}"], replacement: "Detailed summary preserving key findings, errors, commands/files, conclusions, and remaining uncertainty." }).${contextSentence}`,
+		{ outputTarget: target, toolName: hint.toolName, chars: hint.chars, approxTokens: approxTokens(hint.chars), callDescription: hint.callDescription, outputPreview: hint.outputPreview, contextPercent: percent === undefined ? undefined : Math.round(percent) },
 	);
 	state.hintedOutputEntryIds.add(entry.id);
 	state.hintsThisTurn++;
@@ -995,9 +1037,10 @@ export default function piForget(pi: ExtensionAPI) {
 		const toolCallId = stringField(msg, "toolCallId");
 		if (!toolCallId) return;
 		const toolName = stringField(msg, "toolName") || "tool";
-		const chars = contentText(msg.content).length;
+		const output = contentText(msg.content);
+		const chars = output.length;
 		if (chars >= LARGE_OUTPUT_HINT_CHARS) {
-			const hint = { toolCallId, toolName, chars };
+			const hint = { toolCallId, toolName, chars, callDescription: findToolCallDescription(ctx, toolCallId), outputPreview: compactText(output, 180) };
 			if (!maybeSendLargeOutputHint(pi, ctx, hintState, hint)) pendingLargeOutputHints.set(toolCallId, hint);
 		} else {
 			maybeSendContextUsageHint(pi, ctx, hintState);
