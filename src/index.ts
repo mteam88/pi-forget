@@ -15,7 +15,7 @@ const SUMMARY_SNIPPET_CHARS = 90;
 const DEFAULT_SUGGESTION_LIMIT = 8;
 const DEFAULT_OUTPUT_LIMIT = 20;
 const MAX_OUTPUT_LIMIT = 100;
-const LARGE_OUTPUT_HINT_CHARS = 8_000;
+const LARGE_OUTPUT_HINT_CHARS = 20_000;
 const MAX_LARGE_OUTPUT_HINTS_PER_TURN = 3;
 const CONTEXT_USAGE_HINT_PERCENT = 80;
 const CUSTOM_TYPE = "pi-forget";
@@ -348,10 +348,35 @@ function countOutputChars(items: ContextItem[]): number {
 	return items.reduce((total, item) => total + (outputSurfaceText(item)?.length ?? 0), 0);
 }
 
+function contextChars(item: ContextItem): number {
+	const msg = messageRecord(item.message);
+	switch (msg.role) {
+		case "assistant":
+			return asContentBlocks(msg.content).reduce((total, block) => {
+				if (block.type === "text" && typeof block.text === "string") return total + block.text.length;
+				if (block.type === "thinking" && typeof block.thinking === "string") return total + block.thinking.length;
+				if (block.type === "toolCall") return total + compactJson(block.arguments ?? {}).length + stringField(block, "name").length + stringField(block, "id").length;
+				return total;
+			}, 0);
+		case "bashExecution":
+			return stringField(msg, "command").length + stringField(msg, "output").length;
+		case "branchSummary":
+		case "compactionSummary":
+			return stringField(msg, "summary").length;
+		default:
+			return contentText(msg.content).length;
+	}
+}
+
+function countContextChars(items: ContextItem[]): number {
+	return items.reduce((total, item) => total + contextChars(item), 0);
+}
+
 function formatTurnSummary(turn: Turn): string {
 	const outputChars = countOutputChars(turn.items);
-	const suffix = outputChars > 0 ? `, ${outputChars} output chars` : "";
-	return `turn:${turn.number}  user: "${compactText(firstUserText(turn), SUMMARY_SNIPPET_CHARS)}"  ${turn.items.length} entries${suffix}`;
+	const totalChars = countContextChars(turn.items);
+	const outputSuffix = outputChars > 0 ? `, ${outputChars} output chars (~${approxTokens(outputChars)} tokens)` : "";
+	return `turn:${turn.number}  user: "${compactText(firstUserText(turn), SUMMARY_SNIPPET_CHARS)}"  ${turn.items.length} entries, ~${approxTokens(totalChars)} total tokens${outputSuffix}`;
 }
 
 interface OutputSearchOptions {
@@ -381,7 +406,7 @@ function formatOutputCandidate(candidate: { item: ContextItem; output: string },
 	const msg = messageRecord(candidate.item.message);
 	const kind = msg.role === "toolResult" ? `tool ${stringField(msg, "toolName") || "tool"}` : msg.role ?? "message";
 	const sourcePrefix = source ? `${source}, ` : "";
-	return `output:${candidate.item.entryId}  ${sourcePrefix}${kind}, ${candidate.output.length} chars, "${compactText(candidate.output, SUMMARY_SNIPPET_CHARS)}"`;
+	return `output:${candidate.item.entryId}  ${sourcePrefix}${kind}, ${candidate.output.length} chars (~${approxTokens(candidate.output.length)} tokens), "${compactText(candidate.output, SUMMARY_SNIPPET_CHARS)}"`;
 }
 
 function sourceLabels(prelude: ContextItem[], turns: Turn[], includePrelude: boolean): Map<string, string> {
@@ -406,8 +431,9 @@ function pushGroupedOutputCandidates(
 	if (includePrelude) {
 		const preludeCandidates = prelude.map((item) => byEntryId.get(item.entryId)).filter((candidate): candidate is { item: ContextItem; output: string } => candidate !== undefined);
 		if (preludeCandidates.length) {
-			const suffix = countOutputChars(prelude) > 0 ? `, ${countOutputChars(prelude)} output chars` : "";
-			lines.push(`prelude  ${prelude.length} entries${suffix}`);
+			const preludeOutputChars = countOutputChars(prelude);
+			const outputSuffix = preludeOutputChars > 0 ? `, ${preludeOutputChars} output chars (~${approxTokens(preludeOutputChars)} tokens)` : "";
+			lines.push(`prelude  ${prelude.length} entries, ~${approxTokens(countContextChars(prelude))} total tokens${outputSuffix}`);
 			for (const candidate of preludeCandidates) lines.push(`  ${formatOutputCandidate(candidate)}`);
 		}
 	}
@@ -459,8 +485,8 @@ function formatProjectedContext(
 	if (detail === "summary") {
 		if (includePreludeOutputs && prelude.length) {
 			const preludeOutputChars = countOutputChars(prelude);
-			const suffix = preludeOutputChars > 0 ? `, ${preludeOutputChars} output chars` : "";
-			lines.push(`prelude  ${prelude.length} entries${suffix}`);
+			const outputSuffix = preludeOutputChars > 0 ? `, ${preludeOutputChars} output chars (~${approxTokens(preludeOutputChars)} tokens)` : "";
+			lines.push(`prelude  ${prelude.length} entries, ~${approxTokens(countContextChars(prelude))} total tokens${outputSuffix}`);
 		}
 		for (const turn of selectedTurns) lines.push(formatTurnSummary(turn));
 		const candidates = getOutputCandidates(outputItems, {
@@ -1002,7 +1028,7 @@ function maybeSendLargeOutputHint(
 	const previewSentence = hint.outputPreview ? ` Output starts: "${hint.outputPreview}".` : "";
 	sendCleanupHint(
 		pi,
-		`pi-forget hint: Large ${hint.toolName} output ${target} is ${hint.chars} chars (~${approxTokens(hint.chars)} tokens).${callSentence}${previewSentence} After extracting the useful facts, this may be a good opportunity to save tokens by replacing the raw output with a detailed summary: forget({ targets: ["${target}"], replacement: "Detailed summary preserving key findings, errors, commands/files, conclusions, and remaining uncertainty." }).${contextSentence}`,
+		`pi-forget hint: Large ${hint.toolName} output ${target} is ${hint.chars} chars (~${approxTokens(hint.chars)} tokens).${callSentence}${previewSentence} In the future, after using the useful facts, this may be a good opportunity to save tokens by replacing the raw output with a detailed summary: forget({ targets: ["${target}"], replacement: "Detailed summary preserving key findings, errors, commands/files, conclusions, and remaining uncertainty." }).${contextSentence}`,
 		{ outputTarget: target, toolName: hint.toolName, chars: hint.chars, approxTokens: approxTokens(hint.chars), callDescription: hint.callDescription, outputPreview: hint.outputPreview, contextPercent: percent === undefined ? undefined : Math.round(percent) },
 	);
 	state.hintedOutputEntryIds.add(entry.id);

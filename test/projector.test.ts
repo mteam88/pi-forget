@@ -77,7 +77,7 @@ function makeCtx(sm: SessionManager): any {
 	const ctx = makeCtx(sm);
 
 	const summary = __test.formatContextIndex(ctx, "recent", 12, "summary");
-	assert.match(summary, /turn:1  user: "old"  3 entries, 13 output chars/);
+	assert.match(summary, /turn:1  user: "old"  3 entries, ~\d+ total tokens, 13 output chars \(~\d+ tokens\)/);
 	assert.match(summary, /Largest forgettable outputs:/);
 	assert.match(summary, new RegExp(`output:${bashId}`));
 	assert.doesNotMatch(summary, /assistant .*old answer/);
@@ -105,11 +105,11 @@ function makeCtx(sm: SessionManager): any {
 	const ctx = makeCtx(sm);
 
 	const summary = __test.formatContextIndex(ctx, "recent", 12, "summary");
-	assert.match(summary, /prelude  2 entries, 14 output chars/);
+	assert.match(summary, /prelude  2 entries, ~\d+ total tokens, 14 output chars \(~\d+ tokens\)/);
 	assert.match(summary, new RegExp(`output:${bashId}  prelude, bashExecution`));
 
 	const outputs = __test.formatContextIndex(ctx, "recent", 12, "outputs");
-	assert.match(outputs, /prelude  2 entries, 14 output chars/);
+	assert.match(outputs, /prelude  2 entries, ~\d+ total tokens, 14 output chars \(~\d+ tokens\)/);
 	assert.match(outputs, new RegExp(`output:${bashId}  bashExecution`));
 }
 
