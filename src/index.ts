@@ -453,6 +453,7 @@ function pushGroupedOutputCandidates(
 }
 
 function formatProjectedContext(
+	ctx: ExtensionContext,
 	prelude: ContextItem[],
 	turns: Turn[],
 	scope: "recent" | "all",
@@ -465,7 +466,10 @@ function formatProjectedContext(
 	const baseTurns = turnNumber !== undefined ? turns.filter((turn) => turn.number === turnNumber) : selectTurns(turns, scope, limit);
 	const excludedStart = Math.max(0, turns.length - Math.max(0, Math.floor(excludeLatestTurns)));
 	const selectedTurns = turnNumber === undefined && excludeLatestTurns > 0 ? baseTurns.filter((turn) => turn.number <= excludedStart) : baseTurns;
-	const lines: string[] = ["Current provider-visible context:", ""];
+	const lines: string[] = ["Current provider-visible context:"];
+	const usageLine = formatContextUsage(ctx);
+	if (usageLine) lines.push(usageLine);
+	lines.push("");
 
 	if (turnNumber !== undefined && selectedTurns.length === 0) {
 		lines.push(`Unknown turn:${turnNumber}.`);
@@ -538,7 +542,7 @@ function formatContextIndex(
 ): string {
 	const { items } = projectContext(ctx);
 	const { prelude, turns } = groupTurns(items);
-	return formatProjectedContext(prelude, turns, scope, limit, detail, turn, outputOptions, excludeLatestTurns);
+	return formatProjectedContext(ctx, prelude, turns, scope, limit, detail, turn, outputOptions, excludeLatestTurns);
 }
 
 function makeRewriteId(existingCount: number): string {
@@ -990,6 +994,23 @@ function contextUsagePercent(ctx: ExtensionContext): number | undefined {
 	const usage = ctx.getContextUsage();
 	if (!usage || usage.percent === null) return undefined;
 	return usage.percent <= 1 ? usage.percent * 100 : usage.percent;
+}
+
+function formatContextUsage(ctx: ExtensionContext): string | undefined {
+	if (typeof ctx.getContextUsage !== "function") return undefined;
+	const usage = ctx.getContextUsage();
+	if (!usage) return undefined;
+	const percent = usage.percent === null ? undefined : usage.percent <= 1 ? usage.percent * 100 : usage.percent;
+	const tokens = usage.tokens === null ? undefined : usage.tokens;
+	const window = usage.contextWindow;
+	const parts: string[] = [];
+	if (percent !== undefined) parts.push(`~${Math.round(percent)}% full`);
+	if (tokens !== undefined && typeof window === "number" && Number.isFinite(window)) {
+		parts.push(`~${Math.round(tokens).toLocaleString()} / ${Math.round(window).toLocaleString()} tokens`);
+	} else if (tokens !== undefined) {
+		parts.push(`~${Math.round(tokens).toLocaleString()} tokens`);
+	}
+	return parts.length ? `Context usage: ${parts.join(", ")}` : undefined;
 }
 
 function sendCleanupHint(pi: ExtensionAPI, content: string, details: Record<string, unknown>): void {
