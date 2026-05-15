@@ -17,7 +17,7 @@ const DEFAULT_OUTPUT_LIMIT = 20;
 const MAX_OUTPUT_LIMIT = 100;
 const LARGE_OUTPUT_HINT_CHARS = 20_000;
 const MAX_LARGE_OUTPUT_HINTS_PER_TURN = 3;
-const CONTEXT_USAGE_HINT_BUCKETS = [80, 90] as const;
+const CONTEXT_USAGE_HINT_BUCKETS = [50, 60, 70, 80, 90] as const;
 const CUSTOM_TYPE = "pi-forget";
 
 type ListContextDetail = "summary" | "entries" | "outputs";
@@ -1044,11 +1044,10 @@ function maybeSendContextUsageHint(pi: ExtensionAPI, ctx: ExtensionContext, stat
 	const bucket = nextContextUsageBucket(percent, state);
 	if (bucket === undefined) return false;
 	const rounded = Math.round(percent);
-	sendCleanupHint(
-		pi,
-		`pi-forget hint: Context just crossed ${bucket}% and appears to be about ${rounded}% full. This may be a good opportunity to save tokens. Consider using list_context to find stale large outputs, then forget to replace useful ones with detailed summaries.`,
-		{ contextPercent: rounded, contextBucket: bucket },
-	);
+	const message = bucket >= 80
+		? `pi-forget hint: Context just crossed ${bucket}% and appears to be about ${rounded}% full. This may be a good opportunity to save tokens. Consider using list_context to find stale large outputs, then forget to replace useful ones with detailed summaries.`
+		: `pi-forget note: Context just crossed ${bucket}% and appears to be about ${rounded}% full. No urgency, but if stale outputs are accumulating, list_context can help you decide whether forget would save tokens without losing useful detail.`;
+	sendCleanupHint(pi, message, { contextPercent: rounded, contextBucket: bucket });
 	state.contextUsageHintedThisTurn = true;
 	state.warnedContextUsageBuckets.add(bucket);
 	return true;
@@ -1066,13 +1065,15 @@ function maybeSendLargeOutputHint(
 	const percent = contextUsagePercent(ctx);
 	const bucket = percent === undefined ? undefined : nextContextUsageBucket(percent, state);
 	const contextSentence = bucket !== undefined && percent !== undefined
-		? ` Context just crossed ${bucket}% and appears to be about ${Math.round(percent)}% full, so summarizing stale large outputs may be especially useful.`
+		? bucket >= 80
+			? ` Context just crossed ${bucket}% and appears to be about ${Math.round(percent)}% full, so summarizing stale large outputs may be especially useful.`
+			: ` Context just crossed ${bucket}% and appears to be about ${Math.round(percent)}% full; no urgency, but list_context can help if stale outputs are accumulating.`
 		: "";
 	const callSentence = hint.callDescription ? ` It came from: ${hint.callDescription}.` : "";
 	const previewSentence = hint.outputPreview ? ` Output starts: "${hint.outputPreview}".` : "";
 	sendCleanupHint(
 		pi,
-		`pi-forget hint: Large ${hint.toolName} output is available as ${target} (${hint.chars} chars, ~${approxTokens(hint.chars)} tokens).${callSentence}${previewSentence} In the future, after using the useful facts, this may be a good opportunity to save tokens by replacing the raw output with a detailed summary using forget({ targets: ["${target}"], replacement: <your detailed summary> }).${contextSentence}`,
+		`pi-forget hint: Large ${hint.toolName} output is available as ${target} (${hint.chars} chars, ~${approxTokens(hint.chars)} tokens).${callSentence}${previewSentence} In the future, after using the useful facts, this may be a good opportunity to save tokens by replacing the raw output with a detailed summary using forget({ targets: ["${target}"], replacement: <your detailed summary> }). If several stale outputs have accumulated, list_context can show them in conversation context before using forget.${contextSentence}`,
 		{ outputTarget: target, toolName: hint.toolName, chars: hint.chars, approxTokens: approxTokens(hint.chars), callDescription: hint.callDescription, outputPreview: hint.outputPreview, contextPercent: percent === undefined ? undefined : Math.round(percent) },
 	);
 	state.hintedOutputEntryIds.add(entry.id);
@@ -1191,7 +1192,7 @@ export default function piForget(pi: ExtensionAPI) {
 			replacement: Type.Optional(
 				Type.String({
 					description:
-						"Optional replacement/summary text to show in the synthetic branch instead of the default pi-forget placeholder. For multiple targets, the same replacement is applied to each target unless replacements provides a per-target override.",
+						"Optional replacement/summary text to show in the synthetic branch instead of the default pi-forget placeholder. Best for one target, or for multiple targets that genuinely share one summary. For multiple distinct outputs, prefer replacements.",
 				}),
 			),
 			replacements: Type.Optional(
@@ -1199,7 +1200,7 @@ export default function piForget(pi: ExtensionAPI) {
 					Type.String(),
 					Type.String({
 						description:
-							"Optional per-target replacement summaries. Keys are target strings such as output:abc12345, entry:abc12345, turn:2, or bare entry ids. Values replace only that target and override replacement.",
+							"Optional per-target replacement summaries for multi-output cleanup. Keys are target strings such as output:abc12345, entry:abc12345, turn:2, or bare entry ids. Prefer this when different output:<id> targets contain different evidence, logs, files, or conclusions. Values replace only that target and override replacement.",
 					}),
 				),
 			),
