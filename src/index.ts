@@ -78,7 +78,7 @@ interface HintState {
 	hintedOutputEntryIds: Set<string>;
 	hintsThisTurn: number;
 	contextUsageHintedThisTurn: boolean;
-	warnedContextUsageBuckets: Set<number>;
+	lastContextUsagePercent?: number;
 }
 
 type MessageRecord = Record<string, unknown> & { role?: string };
@@ -1034,7 +1034,8 @@ function sendCleanupHint(pi: ExtensionAPI, content: string, details: Record<stri
 }
 
 function nextContextUsageBucket(percent: number, state: HintState): number | undefined {
-	return CONTEXT_USAGE_HINT_BUCKETS.find((bucket) => percent >= bucket && !state.warnedContextUsageBuckets.has(bucket));
+	const previous = state.lastContextUsagePercent ?? 0;
+	return CONTEXT_USAGE_HINT_BUCKETS.find((bucket) => previous < bucket && percent >= bucket);
 }
 
 function maybeSendContextUsageHint(pi: ExtensionAPI, ctx: ExtensionContext, state: HintState): boolean {
@@ -1042,6 +1043,7 @@ function maybeSendContextUsageHint(pi: ExtensionAPI, ctx: ExtensionContext, stat
 	const percent = contextUsagePercent(ctx);
 	if (percent === undefined) return false;
 	const bucket = nextContextUsageBucket(percent, state);
+	state.lastContextUsagePercent = percent;
 	if (bucket === undefined) return false;
 	const rounded = Math.round(percent);
 	const message = bucket >= 80
@@ -1049,7 +1051,6 @@ function maybeSendContextUsageHint(pi: ExtensionAPI, ctx: ExtensionContext, stat
 		: `pi-forget note: Context just crossed ${bucket}% and appears to be about ${rounded}% full. No urgency, but if stale outputs are accumulating, list_context can help you decide whether forget would save tokens without losing useful detail.`;
 	sendCleanupHint(pi, message, { contextPercent: rounded, contextBucket: bucket });
 	state.contextUsageHintedThisTurn = true;
-	state.warnedContextUsageBuckets.add(bucket);
 	return true;
 }
 
@@ -1064,6 +1065,7 @@ function maybeSendLargeOutputHint(
 	const target = `output:${entry.id}`;
 	const percent = contextUsagePercent(ctx);
 	const bucket = percent === undefined ? undefined : nextContextUsageBucket(percent, state);
+	if (percent !== undefined) state.lastContextUsagePercent = percent;
 	const contextSentence = bucket !== undefined && percent !== undefined
 		? bucket >= 80
 			? ` Context just crossed ${bucket}% and appears to be about ${Math.round(percent)}% full, so summarizing stale large outputs may be especially useful.`
@@ -1078,10 +1080,7 @@ function maybeSendLargeOutputHint(
 	);
 	state.hintedOutputEntryIds.add(entry.id);
 	state.hintsThisTurn++;
-	if (bucket !== undefined) {
-		state.contextUsageHintedThisTurn = true;
-		state.warnedContextUsageBuckets.add(bucket);
-	}
+	if (bucket !== undefined) state.contextUsageHintedThisTurn = true;
 	return true;
 }
 
@@ -1092,7 +1091,6 @@ export default function piForget(pi: ExtensionAPI) {
 		hintedOutputEntryIds: new Set<string>(),
 		hintsThisTurn: 0,
 		contextUsageHintedThisTurn: false,
-		warnedContextUsageBuckets: new Set<number>(),
 	};
 
 	pi.on("context", async (event, ctx) => {
