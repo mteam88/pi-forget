@@ -4,7 +4,7 @@ A pi extension for reversible, branch-local context forgetting.
 
 `pi-forget` lets the model move future work onto a cleaned synthetic branch, omitting stale prior turns or redacting large outputs without deleting or rewriting JSONL session history. It is a context-budget cleanup tool, not a security/privacy tool: it does not erase session history, logs, or other copies of leaked secrets/tokens.
 
-The original branch remains intact. A forget operation creates a sibling branch from the earliest affected entry, replays kept history, inserts replacement summaries/placeholders, and records metadata so `/unforget` can jump back to the original branch. Replayed entries get new session ids, but pi-forget records aliases so older `entry:<id>` and `output:<id>` targets usually continue to resolve after additional cleanup passes.
+The original branch remains intact. A forget operation creates a sibling branch from the earliest affected entry, replays kept history, inserts replacement summaries/placeholders, and records metadata so `/unforget` can jump back to the original branch. Replayed entries get new session ids, but pi-forget records aliases so older `turn:<id>`, `entry:<id>`, and `output:<id>` targets usually continue to resolve after additional cleanup passes.
 
 ## Install
 
@@ -19,7 +19,7 @@ pi install https://github.com/mteam88/pi-forget
 Lists provider-visible turns with stable targets. Default output is compact:
 
 ```text
-turn:1  user: "old irrelevant turn"  2 entries, 0 output chars
+turn:abc12345  user: "old irrelevant turn"  2 entries, ~120 total tokens
 
 Largest forgettable outputs:
   output:fde92dfa  bashExecution, 12000 chars, "..."
@@ -31,25 +31,25 @@ For routine cleanup, start with the default summary. If output chars are high, s
 list_context({ detail: "outputs", minChars: 2000, maxOutputs: 12, excludeLatestTurns: 1 })
 ```
 
-Use `detail:"entries"` with `turn:N` to expand one turn, or `detail:"outputs"` to search output redaction targets. Output search supports `minChars`, `maxOutputs`, `query`, and `excludeLatestTurns`, includes prelude outputs left visible by compaction/split turns, and prints a ready-to-run `forget({ targets: [...] })` snippet.
+Use `detail:"entries"` with a `turn:<id>` target to expand one turn, or `detail:"outputs"` to search output redaction targets. Output search supports `minChars`, `maxOutputs`, `query`, and `excludeLatestTurns`, and includes prelude outputs left visible by compaction/split turns.
 
 When a tool result is large, pi-forget may also inject a small provider-visible hint with the exact `output:<id>` target so the model can summarize it without first calling `list_context`.
 
 ### `forget`
 
-Prefer `output:<id>` for bulky tool/read/bash/list_context output so the surrounding conversation stays visible. Prefer `turn:N` with `replacement` for completed stale work that can be collapsed into a summary. Do not forget the current/latest turn.
+Prefer `output:<id>` for bulky tool/read/bash/list_context output so the surrounding conversation stays visible. Prefer `turn:<id>` with `replacement` for completed stale work that can be collapsed into a summary. Do not forget the current/latest turn.
 
 Forget a whole visible turn:
 
 ```ts
-forget({ targets: ["turn:1"], reason: "obsolete debugging path" })
+forget({ targets: ["turn:abc12345"], reason: "obsolete debugging path" })
 ```
 
 Or replace it with a short summary:
 
 ```ts
 forget({
-  targets: ["turn:1"],
+  targets: ["turn:abc12345"],
   reason: "collapse completed setup work",
   replacement: "[summary: rebased pi-mono fork, pushed branch, installed pi-forget from GitHub]"
 })
@@ -86,7 +86,7 @@ Do not use `forget` to handle sensitive tokens, credentials, or secrets. Rotate/
 ## Slash commands
 
 ```text
-/forget turn:1 optional reason
+/forget turn:abc12345 optional reason
 /forget entry:fde92dfa optional reason
 /forget output:fde92dfa optional reason
 /forgotten

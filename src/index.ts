@@ -211,11 +211,9 @@ function groupTurns(items: ContextItem[]): { prelude: ContextItem[]; turns: Turn
 	return { prelude, turns };
 }
 
-function parseTurnTarget(target: string): number | undefined {
-	const match = /^turn:(\d+)$/.exec(target.trim());
-	if (!match) return undefined;
-	const num = Number(match[1]);
-	return Number.isSafeInteger(num) && num > 0 ? num : undefined;
+function parseTurnTarget(target: string): string | undefined {
+	const match = /^turn:([a-zA-Z0-9_-]+)$/.exec(target.trim());
+	return match?.[1];
 }
 
 function parseEntryTarget(target: string): string | undefined {
@@ -379,11 +377,15 @@ function countContextChars(items: ContextItem[]): number {
 	return items.reduce((total, item) => total + contextChars(item), 0);
 }
 
+function turnTarget(turn: Turn): string {
+	return `turn:${turn.startEntryId}`;
+}
+
 function formatTurnSummary(turn: Turn): string {
 	const outputChars = countOutputChars(turn.items);
 	const totalChars = countContextChars(turn.items);
 	const outputSuffix = outputChars > 0 ? `, ${outputChars} output chars (~${approxTokens(outputChars)} tokens)` : "";
-	return `turn:${turn.number}  user: "${compactText(firstUserText(turn), SUMMARY_SNIPPET_CHARS)}"  ${turn.items.length} entries, ~${approxTokens(totalChars)} total tokens${outputSuffix}`;
+	return `${turnTarget(turn)}  user: "${compactText(firstUserText(turn), SUMMARY_SNIPPET_CHARS)}"  ${turn.items.length} entries, ~${approxTokens(totalChars)} total tokens${outputSuffix}`;
 }
 
 interface OutputSearchOptions {
@@ -422,7 +424,7 @@ function sourceLabels(prelude: ContextItem[], turns: Turn[], includePrelude: boo
 		for (const item of prelude) labels.set(item.entryId, "prelude");
 	}
 	for (const turn of turns) {
-		for (const item of turn.items) labels.set(item.entryId, `turn:${turn.number}`);
+		for (const item of turn.items) labels.set(item.entryId, turnTarget(turn));
 	}
 	return labels;
 }
@@ -458,20 +460,20 @@ function formatProjectedContext(
 	scope: "recent" | "all",
 	limit: number,
 	detail: ListContextDetail,
-	turnNumber?: number,
+	turnId?: string,
 	outputOptions: OutputSearchOptions = {},
 	excludeLatestTurns = 0,
 ): string {
-	const baseTurns = turnNumber !== undefined ? turns.filter((turn) => turn.number === turnNumber) : selectTurns(turns, scope, limit);
+	const baseTurns = turnId !== undefined ? turns.filter((turn) => turn.startEntryId === turnId) : selectTurns(turns, scope, limit);
 	const excludedStart = Math.max(0, turns.length - Math.max(0, Math.floor(excludeLatestTurns)));
-	const selectedTurns = turnNumber === undefined && excludeLatestTurns > 0 ? baseTurns.filter((turn) => turn.number <= excludedStart) : baseTurns;
+	const selectedTurns = turnId === undefined && excludeLatestTurns > 0 ? baseTurns.filter((turn) => turn.number <= excludedStart) : baseTurns;
 	const lines: string[] = ["Current provider-visible context:"];
 	const usageLine = formatContextUsage(ctx);
 	if (usageLine) lines.push(usageLine);
 	lines.push("");
 
-	if (turnNumber !== undefined && selectedTurns.length === 0) {
-		lines.push(`Unknown turn:${turnNumber}.`);
+	if (turnId !== undefined && selectedTurns.length === 0) {
+		lines.push(`Unknown turn:${turnId}.`);
 		return lines.join("\n");
 	}
 
@@ -480,13 +482,13 @@ function formatProjectedContext(
 		lines.push("");
 	}
 
-	if (!selectedTurns.length && !(turnNumber === undefined && prelude.length)) {
+	if (!selectedTurns.length && !(turnId === undefined && prelude.length)) {
 		lines.push("No visible turns.");
 		return lines.join("\n");
 	}
 
-	const includePreludeOutputs = turnNumber === undefined;
-	const outputTurns = detail === "outputs" && turnNumber === undefined
+	const includePreludeOutputs = turnId === undefined;
+	const outputTurns = detail === "outputs" && turnId === undefined
 		? turns.filter((turn) => turn.number <= excludedStart)
 		: selectedTurns;
 	const outputItems = [...(includePreludeOutputs ? prelude : []), ...outputTurns.flatMap((turn) => turn.items)];
@@ -521,16 +523,16 @@ function formatProjectedContext(
 		}
 	} else {
 		for (const turn of selectedTurns) {
-			lines.push(`turn:${turn.number}`);
+			lines.push(turnTarget(turn));
 			for (const item of turn.items) lines.push(`  ${summarizeItem(item)}`);
 			lines.push("");
 		}
 	}
 
-	const footer = turnNumber === undefined ? formatSelectionFooter(turns.length, selectedTurns.length, scope) : undefined;
+	const footer = turnId === undefined ? formatSelectionFooter(turns.length, selectedTurns.length, scope) : undefined;
 	if (footer) lines.push("", footer);
-	if (excludeLatestTurns > 0 && turnNumber === undefined) lines.push("", `Excluded latest ${excludeLatestTurns} turn(s).`);
-	if (detail === "summary") lines.push("", `Use detail:"entries" with turn:N to expand a turn, or detail:"outputs" to list only output targets.`);
+	if (excludeLatestTurns > 0 && turnId === undefined) lines.push("", `Excluded latest ${excludeLatestTurns} turn(s).`);
+	if (detail === "summary") lines.push("", `Use detail:"entries" with a turn:<id> value to expand a turn, or detail:"outputs" to list only output targets.`);
 	return lines.join("\n").trimEnd();
 }
 
@@ -539,13 +541,19 @@ function formatContextIndex(
 	scope: "recent" | "all",
 	limit: number,
 	detail: ListContextDetail,
-	turn?: number,
+	turn?: string,
 	outputOptions?: OutputSearchOptions,
 	excludeLatestTurns?: number,
 ): string {
-	const { items } = projectContext(ctx);
+	const projection = projectContext(ctx);
+	const { items } = projection;
 	const { prelude, turns } = groupTurns(items);
-	return formatProjectedContext(ctx, prelude, turns, scope, limit, detail, turn, outputOptions, excludeLatestTurns);
+	let resolvedTurn = turn;
+	if (turn !== undefined) {
+		const resolved = resolveVisibleItem(items, aliasTargetsFromBranch(projection.branch), turn, (item) => item.message.role === "user");
+		resolvedTurn = resolved.item?.entryId ?? resolved.resolvedId ?? turn;
+	}
+	return formatProjectedContext(ctx, prelude, turns, scope, limit, detail, resolvedTurn, outputOptions, excludeLatestTurns);
 }
 
 function makeRewriteId(existingCount: number): string {
@@ -660,7 +668,7 @@ function buildForgetPlan(
 	const projection = projectContext(ctx);
 	const { branch, items } = projection;
 	const { turns } = groupTurns(items);
-	const latestTurn = turns.at(-1)?.number;
+	const latestTurnId = turns.at(-1)?.startEntryId;
 	const indexById = branchIndexById(branch);
 	const aliasTargets = aliasTargetsFromBranch(branch);
 	const plan: RewritePlan = {
@@ -690,18 +698,28 @@ function buildForgetPlan(
 	};
 
 	for (const target of targets) {
-		const turnNumber = parseTurnTarget(target);
-		if (turnNumber !== undefined) {
-			const canonicalTarget = `turn:${turnNumber}`;
-			const turn = turns.find((candidate) => candidate.number === turnNumber);
-			if (!turn) return { error: { text: `Unknown ${target}. Run list_context for current turn numbers.`, details: { error: "unknown_turn", target } } };
-			if (turnNumber === latestTurn) {
+		const requestedTurnId = parseTurnTarget(target);
+		if (requestedTurnId !== undefined) {
+			const canonicalTarget = `turn:${requestedTurnId}`;
+			const resolved = resolveVisibleItem(items, aliasTargets, requestedTurnId, (item) => item.message.role === "user");
+			if (resolved.ambiguousIds) {
+				return {
+					error: {
+						text: `Ambiguous turn ${requestedTurnId} after synthetic branch replay. Re-run list_context for current targets.`,
+						details: { error: "ambiguous_turn", target, matches: resolved.ambiguousIds },
+					},
+				};
+			}
+			const resolvedTurnId = resolved.resolvedId ?? requestedTurnId;
+			const turn = turns.find((candidate) => candidate.startEntryId === resolvedTurnId || candidate.startEntryId === resolved.item?.entryId);
+			if (!turn) return { error: { text: `Unknown ${target}. Run list_context for current turn ids.`, details: { error: "unknown_turn", target } } };
+			if (turn.startEntryId === latestTurnId) {
 				return { error: { text: `Refusing to forget ${target}: pi-forget does not forget the current/latest turn.`, details: { error: "latest_turn", target } } };
 			}
 			const ids = turn.items.flatMap(sourceEntryIds);
 			const first = ids[0];
 			if (!first) return { error: { text: `Could not resolve ${target} to source entries.`, details: { error: "unresolved_turn", target } } };
-			addInsertBefore(first, replacementForTarget("turn", canonicalTarget, [target, canonicalTarget], replacement, replacements));
+			addInsertBefore(first, replacementForTarget("turn", canonicalTarget, [target, canonicalTarget, requestedTurnId, turnTarget(turn), turn.startEntryId], replacement, replacements));
 			for (const id of ids) {
 				plan.dropEntryIds.add(id);
 				markChanged(id);
@@ -753,7 +771,7 @@ function buildForgetPlan(
 			continue;
 		}
 
-		return { error: { text: `Invalid target ${target}. Use turn:N, entry:<id>, or output:<id> from list_context.`, details: { error: "invalid_target", target } } };
+		return { error: { text: `Invalid target ${target}. Use turn:<id>, entry:<id>, or output:<id> from list_context.`, details: { error: "invalid_target", target } } };
 	}
 
 	if (!Number.isFinite(plan.firstChangedIndex)) {
@@ -1130,12 +1148,12 @@ export default function piForget(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "list_context",
 		label: "List Context",
-		description: "Inspect provider-visible context and find stable turn:N, entry:<id>, and output:<id> targets for forget.",
+		description: "Inspect provider-visible context and find stable turn:<id>, entry:<id>, and output:<id> targets for forget.",
 		promptSnippet: "Inspect visible context and find forget targets",
 		promptGuidelines: [
 			"Use list_context to discover cleanup targets when stale context or large outputs are making the session harder to work with.",
 			"Use list_context with detail:\"outputs\" to find large raw outputs, including prelude outputs left visible by compaction or split turns.",
-			"Use list_context with detail:\"entries\" and turn:N when deciding whether a completed turn or phase should be summarized.",
+			"Use list_context with detail:\"entries\" and a turn:<id> target when deciding whether a completed turn or phase should be summarized.",
 		],
 		parameters: Type.Object({
 			scope: Type.Optional(Type.Union([Type.Literal("recent"), Type.Literal("all")], { default: "all" })),
@@ -1143,7 +1161,7 @@ export default function piForget(pi: ExtensionAPI) {
 			detail: Type.Optional(
 				Type.Union([Type.Literal("summary"), Type.Literal("entries"), Type.Literal("outputs")], { default: "summary" }),
 			),
-			turn: Type.Optional(Type.Number({ minimum: 1, description: "Specific turn number to inspect." })),
+			turn: Type.Optional(Type.String({ description: "Specific turn id to inspect, such as the turn:<id> target shown by list_context. The turn: prefix is optional here." })),
 			minChars: Type.Optional(Type.Number({ minimum: 0, description: "Only show output targets with at least this many characters." })),
 			maxOutputs: Type.Optional(Type.Number({ minimum: 1, maximum: MAX_OUTPUT_LIMIT, default: DEFAULT_OUTPUT_LIMIT })),
 			query: Type.Optional(Type.String({ description: "Filter output targets by entry id, role, tool name, command, or output text." })),
@@ -1153,7 +1171,7 @@ export default function piForget(pi: ExtensionAPI) {
 			const scope = params.scope ?? "all";
 			const detail = params.detail ?? "summary";
 			const limit = Math.min(MAX_LIST_LIMIT, Math.max(1, Math.floor(params.limit ?? DEFAULT_LIST_LIMIT)));
-			const turn = params.turn === undefined ? undefined : Math.max(1, Math.floor(params.turn));
+			const turn = params.turn === undefined ? undefined : parseTurnTarget(params.turn) ?? params.turn.replace(/^turn:/, "");
 			const outputOptions = {
 				minChars: params.minChars,
 				maxOutputs: params.maxOutputs ?? (detail === "outputs" ? DEFAULT_OUTPUT_LIMIT : DEFAULT_SUGGESTION_LIMIT),
@@ -1172,18 +1190,18 @@ export default function piForget(pi: ExtensionAPI) {
 		label: "Forget",
 		description:
 			"Create a synthetic branch where selected visible context is omitted or replaced by summaries. Original session history remains unchanged. This is for context-budget cleanup, not secure deletion.",
-		promptSnippet: "Omit or summarize stale context using turn:N, entry:<id>, or output:<id> targets",
+		promptSnippet: "Omit or summarize stale context using turn:<id>, entry:<id>, or output:<id> targets",
 		promptGuidelines: [
 			"Use forget tastefully and considerately: keep recent outputs visible when they are still useful. Avoid needing to re-read relevant info; it is a balance.",
 			"Use forget after large logs, file reads, search results, or skill docs have clearly served their purpose and a summary would preserve the important facts more compactly.",
 			"Prefer forget with output:<id> when only one raw tool output is bulky; this keeps the surrounding conversation intact.",
 			"When forgetting multiple output:<id> targets, prefer forget with replacements unless one shared summary clearly preserves the useful facts from all outputs.",
-			"Use forget with turn:N when a whole completed turn or phase can be represented more compactly as a summary.",
+			"Use forget with turn:<id> when a whole completed turn or phase can be represented more compactly as a summary.",
 			"Keep the current/latest turn visible unless the user explicitly asks otherwise.",
 			"Do not use forget as a privacy or secret-removal mechanism; it only moves future work to a cleaned branch.",
 		],
 		parameters: Type.Object({
-			targets: Type.Array(Type.String({ description: "Targets to forget or summarize: turn:N, entry:<id>, or output:<id>." }), {
+			targets: Type.Array(Type.String({ description: "Targets to forget or summarize: turn:<id>, entry:<id>, or output:<id>." }), {
 				minItems: 1,
 			}),
 			reason: Type.Optional(Type.String({ description: "Why this context should be omitted or summarized." })),
@@ -1198,7 +1216,7 @@ export default function piForget(pi: ExtensionAPI) {
 					Type.String(),
 					Type.String({
 						description:
-							"Optional per-target replacement summaries for multi-output cleanup. Keys are target strings such as output:abc12345, entry:abc12345, turn:2, or bare entry ids. Prefer this when different output:<id> targets contain different evidence, logs, files, or conclusions. Values replace only that target and override replacement.",
+							"Optional per-target replacement summaries for multi-output cleanup. Keys are target strings such as output:abc12345, entry:abc12345, turn:abc12345, or bare entry ids. Prefer this when different output:<id> targets contain different evidence, logs, files, or conclusions. Values replace only that target and override replacement.",
 					}),
 				),
 			),
@@ -1214,12 +1232,12 @@ export default function piForget(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("forget", {
-		description: "Create a synthetic branch forgetting stale provider-visible turns, entries, or outputs: /forget turn:N|entry:id|output:id [reason]",
+		description: "Create a synthetic branch forgetting stale provider-visible turns, entries, or outputs: /forget turn:<id>|entry:<id>|output:<id> [reason]",
 		handler: async (args, ctx) => {
 			await ctx.waitForIdle();
 			const [target, ...reasonParts] = args.trim().split(/\s+/).filter(Boolean);
 			if (!target) {
-				ctx.ui.notify("Usage: /forget turn:N|entry:id|output:id [reason]", "warning");
+				ctx.ui.notify("Usage: /forget turn:<id>|entry:<id>|output:<id> [reason]", "warning");
 				return;
 			}
 			const result = applyForget(ctx, [target], reasonParts.join(" ") || undefined);

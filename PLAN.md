@@ -4,7 +4,7 @@
 
 `pi-forget` no longer depends on native `context_rewrite` entries or a forked Pi build. It now uses Pi's append-only session tree directly:
 
-1. Resolve `turn:N`, `entry:<id>`, and `output:<id>` targets from the current provider-visible branch projection.
+1. Resolve stable `turn:<id>`, `entry:<id>`, and `output:<id>` targets from the current provider-visible branch projection.
 2. Find the earliest affected source entry.
 3. Branch to that entry's parent.
 4. Replay later branch entries into a new synthetic branch:

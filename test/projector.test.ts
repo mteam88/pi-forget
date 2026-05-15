@@ -49,7 +49,7 @@ function makeCtx(sm: SessionManager): any {
 }
 
 {
-	assert.equal(__test.parseTurnTarget("turn:12"), 12);
+	assert.equal(__test.parseTurnTarget("turn:abc12345"), "abc12345");
 	assert.equal(__test.parseTurnTarget("range:a..b"), undefined);
 	assert.equal(__test.parseEntryTarget("entry:abc12345"), "abc12345");
 	assert.equal(__test.parseEntryTarget("abc12345"), "abc12345");
@@ -70,26 +70,26 @@ function makeCtx(sm: SessionManager): any {
 
 {
 	const sm = makeSession();
-	sm.appendMessage(user("old"));
+	const oldTurn = sm.appendMessage(user("old"));
 	sm.appendMessage(assistant("old answer"));
 	const bashId = sm.appendMessage(bash("printf secret", "SECRET OUTPUT"));
 	sm.appendMessage(user("current"));
 	const ctx = makeCtx(sm);
 
 	const summary = __test.formatContextIndex(ctx, "recent", 12, "summary");
-	assert.match(summary, /turn:1  user: "old"  3 entries, ~\d+ total tokens, 13 output chars \(~\d+ tokens\)/);
+	assert.match(summary, new RegExp(`turn:${oldTurn}  user: "old"  3 entries, ~\\d+ total tokens, 13 output chars \\(~\\d+ tokens\\)`));
 	assert.match(summary, /Largest forgettable outputs:/);
 	assert.match(summary, new RegExp(`output:${bashId}`));
 	assert.doesNotMatch(summary, /assistant .*old answer/);
 
-	const entries = __test.formatContextIndex(ctx, "recent", 12, "entries", 1);
+	const entries = __test.formatContextIndex(ctx, "recent", 12, "entries", oldTurn);
 	assert.match(entries, /assistant .*: text/);
 	assert.match(entries, /bashExecution .*:/);
 
-	const outputs = __test.formatContextIndex(ctx, "recent", 12, "outputs", 1);
+	const outputs = __test.formatContextIndex(ctx, "recent", 12, "outputs", oldTurn);
 	assert.match(outputs, /Output targets grouped by where they appear in the conversation:/);
 	assert.match(outputs, new RegExp(`output:${bashId}`));
-	assert.match(outputs, /turn:1  user/);
+	assert.match(outputs, new RegExp(`turn:${oldTurn}  user`));
 
 	const filtered = __test.formatContextIndex(ctx, "recent", 12, "outputs", undefined, { minChars: 20 });
 	assert.match(filtered, /No output targets found/);
@@ -115,10 +115,10 @@ function makeCtx(sm: SessionManager): any {
 
 {
 	const sm = makeSession();
-	sm.appendMessage(user("old"));
+	const u1 = sm.appendMessage(user("old"));
 	sm.appendMessage(assistant("old answer"));
 	sm.appendMessage(user("current"));
-	const result = __test.applyForget(makeCtx(sm), ["turn:1"], "obsolete", "[summary: old work completed]");
+	const result = __test.applyForget(makeCtx(sm), [`turn:${u1}`], "obsolete", "[summary: old work completed]");
 	assert.match(result.text, /Created synthetic pi-forget branch/);
 	const context = sm.buildSessionContext();
 	const serialized = JSON.stringify(context.messages);
@@ -130,7 +130,8 @@ function makeCtx(sm: SessionManager): any {
 {
 	const sm = makeSession();
 	sm.appendMessage(user("current"));
-	const result = __test.applyForget(makeCtx(sm), ["turn:1"]);
+	const currentTurn = sm.getLeafId();
+	const result = __test.applyForget(makeCtx(sm), [`turn:${currentTurn}`]);
 	assert.match(result.text, /Refusing to forget/);
 	assert.equal(sm.getBranch().length, 1);
 }
@@ -195,6 +196,24 @@ function makeCtx(sm: SessionManager): any {
 	assert.doesNotMatch(serialized, /SECOND RAW/);
 	assert.match(serialized, /First output summary/);
 	assert.match(serialized, /Second output summary/);
+}
+
+{
+	const sm = makeSession();
+	const oldTurn = sm.appendMessage(user("old turn"));
+	sm.appendMessage(assistant("old answer"));
+	const bashId = sm.appendMessage(bash("printf old", "OLD RAW"));
+	sm.appendMessage(user("current"));
+	__test.applyForget(makeCtx(sm), [`output:${bashId}`], "large", "Old output summary");
+	const expanded = __test.formatContextIndex(makeCtx(sm), "recent", 12, "entries", oldTurn);
+	assert.match(expanded, new RegExp(`turn:[a-zA-Z0-9_-]+`));
+	assert.match(expanded, /Old output summary/);
+	const result = __test.applyForget(makeCtx(sm), [`turn:${oldTurn}`], "obsolete", "Old turn summary");
+	assert.match(result.text, new RegExp(`turn:${oldTurn}`));
+	const serialized = JSON.stringify(sm.buildSessionContext().messages);
+	assert.doesNotMatch(serialized, /old answer/);
+	assert.doesNotMatch(serialized, /Old output summary/);
+	assert.match(serialized, /Old turn summary/);
 }
 
 {
