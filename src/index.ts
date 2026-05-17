@@ -908,11 +908,21 @@ function applyForgetPlan(ctx: ExtensionContext, plan: RewritePlan): ApplyForgetR
 	};
 }
 
+function appendContextUsageToForgetResult(ctx: ExtensionContext, result: ApplyForgetResult): ApplyForgetResult {
+	const usageLine = formatContextUsage(ctx);
+	if (!usageLine) return result;
+	return {
+		...result,
+		text: `${result.text}\n\n${usageLine}`,
+		details: { ...result.details, contextUsage: usageLine },
+	};
+}
+
 function applyForget(ctx: ExtensionContext, targets: string[], reason?: string, replacement?: string, replacements?: Record<string, string>): ApplyForgetResult {
 	const { plan, error } = buildForgetPlan(ctx, targets, reason, replacement, replacements);
 	if (error) return error;
 	if (!plan) return { text: "No changes to apply.", details: { error: "empty_plan" } };
-	return applyForgetPlan(ctx, plan);
+	return appendContextUsageToForgetResult(ctx, applyForgetPlan(ctx, plan));
 }
 
 function labelSyntheticBranch(pi: ExtensionAPI, ctx: ExtensionContext, result: ApplyForgetResult): void {
@@ -1053,7 +1063,7 @@ function sendCleanupHint(pi: ExtensionAPI, content: string, details: Record<stri
 
 function nextContextUsageBucket(percent: number, state: HintState): number | undefined {
 	const previous = state.lastContextUsagePercent ?? 0;
-	return CONTEXT_USAGE_HINT_BUCKETS.find((bucket) => previous < bucket && percent >= bucket);
+	return [...CONTEXT_USAGE_HINT_BUCKETS].reverse().find((bucket) => previous < bucket && percent >= bucket);
 }
 
 function maybeSendContextUsageHint(pi: ExtensionAPI, ctx: ExtensionContext, state: HintState): boolean {
